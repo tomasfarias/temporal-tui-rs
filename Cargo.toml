@@ -1,0 +1,23 @@
+[package]
+name = "temporatuiltui-rs"
+version = "0.1.0"
+authors = ["Tomás Farías Santana <tomas@tomasfarias.dev>"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+config = { version = "0.15.6", features = ["toml"] }
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+futures = "0.3.31"
+ratatui = "0.29.0"
+serde = "1.0"
+serde_derive = "1.0"
+tokio = { version = "1.40.0", features = ["full"] }
+temporal-client = { git = "https://github.com/temporalio/sdk-core", version = "0.1" }
+temporal-sdk-core-protos = { git = "https://github.com/temporalio/sdk-core", version = "0.1" }
+x509-parser = "0.16"
+url = "2.5.4"
+anyhow = "1.0.95"
+structured-logger = "1.0.3"
+log = "0.4.25"
+chrono = "0.4.39"
