@@ -9,6 +9,7 @@ use temporal_sdk_core_protos::temporal::api::{
     workflowservice::v1::ListWorkflowExecutionsResponse,
 };
 use tokio::sync::mpsc;
+use tokio::task;
 use tokio::time;
 
 const PALETTES: [tailwind::Palette; 4] = [
@@ -27,7 +28,7 @@ pub struct WorkflowTableWidget {
     state: sync::Arc<sync::RwLock<WorkflowTableState>>,
     temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     sender: sync::Arc<Option<mpsc::Sender<Message>>>,
-    page_size: i32,
+    page_size: u32,
     colors: TableColors,
     last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
 }
@@ -169,7 +170,7 @@ enum Message {
 impl WorkflowTableWidget {
     pub fn new(
         temporal_client: &sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
-        page_size: i32,
+        page_size: u32,
     ) -> Self {
         Self {
             state: sync::Arc::new(sync::RwLock::new(WorkflowTableState::default())),
@@ -202,7 +203,7 @@ impl WorkflowTableWidget {
                     self.set_loading_state(LoadingState::Loading);
                     let list_workflow_executions_result = self
                         .temporal_client
-                        .list_workflow_executions(self.page_size, Vec::new(), "".to_string())
+                        .list_workflow_executions(self.page_size as i32, Vec::new(), "".to_string())
                         .await;
 
                     match list_workflow_executions_result {
@@ -218,7 +219,7 @@ impl WorkflowTableWidget {
                     self.set_loading_state(LoadingState::Loading);
                     let list_workflow_executions_result = self
                         .temporal_client
-                        .list_workflow_executions(self.page_size, page_token, "".to_string())
+                        .list_workflow_executions(self.page_size as i32, page_token, "".to_string())
                         .await;
 
                     match list_workflow_executions_result {
@@ -282,7 +283,7 @@ impl WorkflowTableWidget {
 
         state.workflow_executions.extend(executions);
 
-        if !state.workflow_executions.is_empty() {
+        if !state.workflow_executions.is_empty() && clear {
             state.table_state.select(Some(0));
         }
     }
@@ -297,7 +298,50 @@ impl WorkflowTableWidget {
         sender.unwrap().send(Message::Reload).await.unwrap();
     }
 
-    pub fn next_row(&mut self) {
+    pub fn is_loading(&self) -> bool {
+        let state = self.state.read().unwrap();
+        match state.loading_state {
+            LoadingState::Loading => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_error(&self) -> (bool, Option<String>) {
+        let state = self.state.read().unwrap();
+        match &state.loading_state {
+            LoadingState::Error(s) => (true, Some(s.to_owned())),
+            _ => (false, None),
+        }
+    }
+
+    pub async fn load_next_page(&self) {
+        let state = self.state.read().unwrap();
+        let next_page_token = state.next_page_token.as_ref().cloned();
+        if let Some(page_token) = next_page_token {
+            let sender = self.sender.as_ref().clone();
+            sender
+                .unwrap()
+                .send(Message::LoadPage { page_token })
+                .await
+                .unwrap();
+        }
+    }
+
+    pub async fn next_row(&mut self) {
+        let on_last_row = self.is_on_last_row();
+        if on_last_row {
+            self.load_next_page().await;
+            task::yield_now().await;
+        }
+
+        loop {
+            let on_last_row = self.is_on_last_row();
+            if !on_last_row {
+                break;
+            }
+            task::yield_now().await;
+        }
+
         let mut state = self.state.write().unwrap();
         let i = match state.table_state.selected() {
             Some(i) => {
@@ -311,6 +355,20 @@ impl WorkflowTableWidget {
         };
         state.table_state.select(Some(i));
         state.scrollbar_state = state.scrollbar_state.position(i * ITEM_HEIGHT);
+    }
+
+    pub fn is_on_last_row(&self) -> bool {
+        let state = self.state.read().unwrap();
+        match state.table_state.selected() {
+            Some(i) => {
+                if i >= state.workflow_executions.len() - 1 {
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        }
     }
 
     pub fn previous_row(&mut self) {

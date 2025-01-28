@@ -12,6 +12,7 @@ use ratatui::{
     symbols, text, widgets, Frame,
 };
 use temporal_client::{self, Client, ClientOptions, ClientOptionsBuilder, RetryClient};
+use tokio::task;
 use url::Url;
 
 use crate::{
@@ -38,7 +39,7 @@ pub struct App {
     pub temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     pub namespace: String,
     current_view: CurrentView,
-    pub workflow_list: WorkflowTableWidget,
+    pub workflow_table: WorkflowTableWidget,
 }
 
 #[derive(Debug)]
@@ -89,13 +90,13 @@ impl App {
         let namespace = settings.namespace.clone();
         let temporal_client = sync::Arc::new(client_options.connect(&namespace, None).await?);
 
-        let workflow_list = WorkflowTableWidget::new(&temporal_client, 100);
+        let workflow_table = WorkflowTableWidget::new(&temporal_client, 48);
 
         Ok(App {
             running: true,
             temporal_client,
             namespace,
-            workflow_list,
+            workflow_table,
             current_view: CurrentView::WorkflowTable,
         })
     }
@@ -103,7 +104,7 @@ impl App {
     pub async fn run<B: Backend>(mut self, mut terminal: Tui<B>) -> Result<(), anyhow::Error> {
         terminal.init()?;
 
-        self.workflow_list.run(true).await;
+        self.workflow_table.run(true).await;
 
         let period = time::Duration::from_secs_f32(1.0 / 60.0);
         let mut interval = tokio::time::interval(period);
@@ -154,7 +155,7 @@ impl App {
         let [left_title_area, center_title_area, right_title_area] =
             title_horizontal.areas(title_inner_area);
 
-        let last_reload_string = match self.workflow_list.get_duration_since_last_reload() {
+        let last_reload_string = match self.workflow_table.get_duration_since_last_reload() {
             Some(duration) => format!("Last reload: {}s ago", duration.as_secs()),
             None => "Last reload: N/A".to_string(),
         };
@@ -170,23 +171,46 @@ impl App {
         frame.render_widget(&last_reload_title, right_title_area);
         frame.render_widget(&app_title, center_title_area);
 
-        frame.render_widget(&self.workflow_list, body_area);
+        frame.render_widget(&self.workflow_table, body_area);
     }
 
     fn title(&self) -> String {
         format!("Temporal TUI - {}", self.namespace)
     }
 
-    pub fn next_row(&mut self) {
-        self.workflow_list.next_row();
+    pub async fn scroll_current_view_down(&mut self) {
+        match self.current_view {
+            CurrentView::WorkflowTable => self.workflow_table.next_row().await,
+            CurrentView::ScheduleTable => panic!("not implemented"),
+        }
     }
 
-    pub fn previous_row(&mut self) {
-        self.workflow_list.previous_row();
+    pub fn is_current_view_at_bottom(&self) -> bool {
+        match self.current_view {
+            CurrentView::WorkflowTable => self.workflow_table.is_on_last_row(),
+            CurrentView::ScheduleTable => panic!("not implemented"),
+        }
     }
 
-    pub async fn reload(&self) {
-        self.workflow_list.reload().await;
+    pub fn scroll_current_view_up(&mut self) {
+        match self.current_view {
+            CurrentView::WorkflowTable => self.workflow_table.previous_row(),
+            CurrentView::ScheduleTable => panic!("not implemented"),
+        }
+    }
+
+    pub async fn reload_current_view(&self) {
+        match self.current_view {
+            CurrentView::WorkflowTable => self.workflow_table.reload().await,
+            CurrentView::ScheduleTable => panic!("not implemented"),
+        }
+    }
+
+    pub fn is_current_view_loading(&self) -> bool {
+        match self.current_view {
+            CurrentView::WorkflowTable => self.workflow_table.is_loading(),
+            CurrentView::ScheduleTable => panic!("not implemented"),
+        }
     }
 
     pub async fn handle_event(&mut self, event: &Event) {
@@ -203,9 +227,9 @@ impl App {
                             self.quit();
                         }
                     }
-                    KeyCode::Char('j') | KeyCode::Down => self.next_row(),
-                    KeyCode::Char('k') | KeyCode::Up => self.previous_row(),
-                    KeyCode::Char('r') | KeyCode::Right => self.reload().await,
+                    KeyCode::Char('j') | KeyCode::Down => self.scroll_current_view_down().await,
+                    KeyCode::Char('k') | KeyCode::Up => self.scroll_current_view_up(),
+                    KeyCode::Char('r') | KeyCode::Right => self.reload_current_view().await,
                     _ => {}
                 }
             }
