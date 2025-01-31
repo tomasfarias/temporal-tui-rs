@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::ops;
+use std::ops::Deref;
 use std::sync;
 
+use crossterm::event;
 use ratatui::{buffer, layout, style, style::palette::tailwind, style::Stylize, text, widgets};
 use temporal_client::{self, tonic::Status, WorkflowClientTrait};
 use temporal_sdk_core_protos::temporal::api::{
@@ -21,8 +23,6 @@ const PALETTES: [tailwind::Palette; 4] = [
 
 const ITEM_HEIGHT: usize = 1;
 
-const FOOTER_INFO_TEXT: [&str; 1] = ["(q) quit | (↑/j) move up | (↓/k) move down | (r) reload"];
-
 #[derive(Debug, Clone)]
 pub struct WorkflowTableWidget {
     state: sync::Arc<sync::RwLock<WorkflowTableState>>,
@@ -31,6 +31,123 @@ pub struct WorkflowTableWidget {
     page_size: u32,
     colors: TableColors,
     last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
+    query: sync::Arc<sync::RwLock<QueryInput>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryInput {
+    query: Option<String>,
+    placeholder: String,
+    cursor: usize,
+}
+
+impl Default for QueryInput {
+    fn default() -> Self {
+        Self {
+            query: None,
+            placeholder: "Enter a query".to_string(),
+            cursor: 0,
+        }
+    }
+}
+
+impl QueryInput {
+    pub fn new(placeholder: &str) -> Self {
+        Self {
+            query: None,
+            placeholder: placeholder.to_string(),
+            cursor: 0,
+        }
+    }
+
+    pub fn query(&self) -> String {
+        match &self.query {
+            Some(q) => q.trim().to_owned(),
+            None => "".to_owned(),
+        }
+    }
+
+    pub fn handle_key(&mut self, key: event::KeyCode) {
+        match key {
+            event::KeyCode::Char(c) => {
+                if let Some(query) = self.query.as_mut() {
+                    if self.cursor == query.len() - 1 {
+                        query.pop();
+                        query.push(c);
+                        query.push(' ');
+                    } else {
+                        query.insert(self.cursor, c);
+                    }
+                    self.cursor += 1;
+                } else {
+                    let mut query = c.to_string();
+                    query.push(' ');
+                    self.query = Some(query);
+                    self.cursor = 1;
+                }
+            }
+            event::KeyCode::Backspace => {
+                if let Some(query) = self.query.as_mut() {
+                    if query.len() > 1 {
+                        if self.cursor == query.len() - 1 {
+                            query.pop();
+                            query.pop();
+                            query.push(' ');
+                        } else {
+                            query.remove(self.cursor);
+                        }
+                        self.cursor -= 1;
+                    }
+                }
+                self.query.take_if(|v| v.len() == 1);
+            }
+            event::KeyCode::Left => {
+                if let Some(_) = self.query.as_ref() {
+                    if self.cursor > 0 {
+                        self.cursor -= 1;
+                    }
+                }
+            }
+            event::KeyCode::Right => {
+                if let Some(query) = self.query.as_ref() {
+                    if self.cursor < query.len() {
+                        self.cursor += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl widgets::Widget for &QueryInput {
+    fn render(self, area: layout::Rect, buf: &mut buffer::Buffer) {
+        let input_block = widgets::Block::bordered()
+            .borders(widgets::Borders::ALL)
+            .border_style(style::Style::new().fg(tailwind::BLUE.c400));
+
+        let query_str = match self.query.as_ref() {
+            Some(q) => q.as_str(),
+            None => self.placeholder.as_str(),
+        };
+
+        let [query_start, cursor_char, query_end]: [&str; 3] = [
+            &query_str[..self.cursor],
+            &query_str[self.cursor..self.cursor + 1],
+            &query_str[self.cursor + 1..],
+        ];
+        let query_start_span = text::Span::from(query_start);
+        let cursor_char_span = text::Span::from(cursor_char).underlined();
+        let query_end_span = text::Span::from(query_end);
+        let input_text = widgets::Paragraph::new(text::Line::from_iter([
+            query_start_span,
+            cursor_char_span,
+            query_end_span,
+        ]))
+        .block(input_block);
+
+        widgets::Widget::render(input_text, area, buf);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -179,6 +296,7 @@ impl WorkflowTableWidget {
             page_size,
             colors: TableColors::new(&PALETTES[0]),
             last_reload: sync::Arc::new(sync::RwLock::new(None)),
+            query: sync::Arc::new(sync::RwLock::new(QueryInput::default())),
         }
     }
 
@@ -201,9 +319,10 @@ impl WorkflowTableWidget {
                 Message::Reload => {
                     log::debug!(widget = "WorkflowTableWidget"; "Reloading");
                     self.set_loading_state(LoadingState::Loading);
+                    let query = self.query.read().unwrap().query();
                     let list_workflow_executions_result = self
                         .temporal_client
-                        .list_workflow_executions(self.page_size as i32, Vec::new(), "".to_string())
+                        .list_workflow_executions(self.page_size as i32, Vec::new(), query)
                         .await;
 
                     match list_workflow_executions_result {
@@ -217,9 +336,10 @@ impl WorkflowTableWidget {
                 Message::LoadPage { page_token } => {
                     log::debug!(widget = "WorkflowTableWidget"; "Loading page {:?}", page_token);
                     self.set_loading_state(LoadingState::Loading);
+                    let query = self.query.read().unwrap().query();
                     let list_workflow_executions_result = self
                         .temporal_client
-                        .list_workflow_executions(self.page_size as i32, page_token, "".to_string())
+                        .list_workflow_executions(self.page_size as i32, page_token, query)
                         .await;
 
                     match list_workflow_executions_result {
@@ -396,15 +516,58 @@ impl WorkflowTableWidget {
             Err(_) => None,
         }
     }
+
+    pub fn handle_insert(&mut self, key: event::KeyCode) {
+        match key {
+            event::KeyCode::Char(_) | event::KeyCode::Backspace | event::KeyCode::Enter => {
+                let mut query_input = self.query.write().unwrap();
+                query_input.handle_key(key);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn handle_normal(&mut self, key: event::KeyCode) {
+        match key {
+            event::KeyCode::Char(_) => {
+                let mut query_input = self.query.write().unwrap();
+                query_input.handle_key(key);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl widgets::Widget for &WorkflowTableWidget {
     fn render(self, area: layout::Rect, buf: &mut buffer::Buffer) {
         let vertical =
-            &layout::Layout::vertical([layout::Constraint::Fill(1), layout::Constraint::Length(3)]);
-        let rects = vertical.split(area);
+            &layout::Layout::vertical([layout::Constraint::Length(3), layout::Constraint::Fill(1)]);
+        let [header_area, body_area] = vertical.areas(area);
 
-        // Render table
+        let header_horizontal = &layout::Layout::horizontal([
+            layout::Constraint::Fill(1),
+            layout::Constraint::Percentage(20),
+        ]);
+        let [header_left_area, header_right_area] = header_horizontal.areas(header_area);
+
+        let last_reload_string = match self.get_duration_since_last_reload() {
+            Some(duration) => format!("Last reload: {}s ago", duration.as_secs()),
+            None => "Last reload: N/A".to_string(),
+        };
+
+        let last_reload_title = widgets::Paragraph::new(text::Text::from(last_reload_string))
+            .style(style::Style::new().fg(tailwind::SLATE.c200))
+            .right_aligned();
+
+        let query_input = self.query.read().unwrap();
+        widgets::Widget::render(&(*query_input), header_left_area, buf);
+        widgets::Widget::render(last_reload_title, header_right_area, buf);
+
+        let table_block = widgets::Block::bordered()
+            .title(text::Line::from("WORKFLOWS").centered())
+            .border_type(widgets::BorderType::Rounded)
+            .border_style(style::Style::new().fg(tailwind::BLUE.c400));
+
         let mut state = self.state.write().unwrap();
         let header_style = style::Style::default()
             .fg(self.colors.header_fg)
@@ -456,6 +619,7 @@ impl widgets::Widget for &WorkflowTableWidget {
                 layout::Constraint::Length(32),
             ],
         )
+        .block(table_block)
         .header(header)
         .row_highlight_style(selected_row_style)
         .column_highlight_style(selected_col_style)
@@ -469,22 +633,7 @@ impl widgets::Widget for &WorkflowTableWidget {
         .bg(self.colors.buffer_bg)
         .highlight_spacing(widgets::HighlightSpacing::Always);
 
-        widgets::StatefulWidget::render(table, rects[0], buf, &mut state.table_state);
-
-        // Render footer
-        let info_footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
-            .style(
-                style::Style::new()
-                    .fg(self.colors.row_fg)
-                    .bg(self.colors.buffer_bg),
-            )
-            .centered()
-            .block(
-                widgets::Block::bordered()
-                    .border_type(widgets::BorderType::Double)
-                    .border_style(style::Style::new().fg(self.colors.footer_border_color)),
-            );
-        widgets::Widget::render(info_footer, rects[1], buf);
+        widgets::StatefulWidget::render(table, body_area, buf, &mut state.table_state);
     }
 }
 

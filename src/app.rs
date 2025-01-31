@@ -19,6 +19,7 @@ use crate::{
     event::Event, settings::Settings, tui::Tui, widgets::workflow_table::WorkflowTableWidget,
 };
 
+const FOOTER_INFO_TEXT: [&str; 1] = ["(q) quit | (↑/j) move up | (↓/k) move down | (r) reload"];
 const BORDER_STYLE: Style = Style::new()
     .fg(material::INDIGO.a100)
     .bg(material::GRAY.c500);
@@ -31,6 +32,12 @@ const TEXT_FG_COLOR: Color = material::WHITE;
 /// Application result type.
 pub type AppResult<T> = std::result::Result<T, anyhow::Error>;
 
+#[derive(Debug)]
+pub enum Mode {
+    Normal,
+    Insert,
+}
+
 /// Application.
 #[derive(Debug)]
 pub struct App {
@@ -38,12 +45,13 @@ pub struct App {
     pub running: bool,
     pub temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     pub namespace: String,
-    current_view: CurrentView,
+    current_view: View,
     pub workflow_table: WorkflowTableWidget,
+    pub current_mode: Mode,
 }
 
 #[derive(Debug)]
-pub enum CurrentView {
+pub enum View {
     WorkflowTable,
     ScheduleTable,
 }
@@ -97,7 +105,8 @@ impl App {
             temporal_client,
             namespace,
             workflow_table,
-            current_view: CurrentView::WorkflowTable,
+            current_view: View::WorkflowTable,
+            current_mode: Mode::Normal,
         })
     }
 
@@ -129,49 +138,35 @@ impl App {
     }
 
     pub fn render_current_view(&mut self, frame: &mut Frame) {
-        match self.current_view {
-            CurrentView::WorkflowTable => self.render_workflow_table(frame),
-            _ => panic!("Unsupported view"),
-        }
-    }
+        let app_block = widgets::Block::bordered()
+            .title(text::Line::from(self.title()).centered())
+            .borders(widgets::Borders::NONE);
 
-    pub fn render_workflow_table(&mut self, frame: &mut Frame) {
+        let app_area = app_block.inner(frame.area());
+        frame.render_widget(&app_block, frame.area());
+
         let vertical =
-            &layout::Layout::vertical([layout::Constraint::Length(3), layout::Constraint::Fill(1)]);
-        let [title_area, body_area] = vertical.areas(frame.area());
+            &layout::Layout::vertical([layout::Constraint::Fill(1), layout::Constraint::Length(2)]);
+        let [body_area, footer_area] = vertical.areas(app_area);
 
-        let block = widgets::Block::bordered()
-            .border_type(widgets::BorderType::Double)
-            .border_style(style::Style::new().fg(tailwind::BLUE.c400));
-
-        let title_inner_area = block.inner(title_area);
-        frame.render_widget(block, title_area);
-
-        let title_horizontal = &layout::Layout::horizontal([
-            layout::Constraint::Fill(1),
-            layout::Constraint::Fill(1),
-            layout::Constraint::Fill(1),
-        ]);
-        let [left_title_area, center_title_area, right_title_area] =
-            title_horizontal.areas(title_inner_area);
-
-        let last_reload_string = match self.workflow_table.get_duration_since_last_reload() {
-            Some(duration) => format!("Last reload: {}s ago", duration.as_secs()),
-            None => "Last reload: N/A".to_string(),
+        match self.current_view {
+            View::WorkflowTable => self.render_workflow_table(frame, body_area),
+            _ => panic!("Unsupported view"),
         };
 
-        let last_reload_title = widgets::Paragraph::new(text::Text::from(last_reload_string))
-            .style(style::Style::new().fg(tailwind::SLATE.c200))
-            .right_aligned();
+        let footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
+            .style(
+                style::Style::new()
+                    .fg(tailwind::SLATE.c200)
+                    .bg(tailwind::SLATE.c950),
+            )
+            .centered()
+            .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
+        frame.render_widget(&footer, footer_area);
+    }
 
-        let app_title = widgets::Paragraph::new(text::Text::from(self.title()))
-            .style(style::Style::new().fg(tailwind::SLATE.c200))
-            .centered();
-
-        frame.render_widget(&last_reload_title, right_title_area);
-        frame.render_widget(&app_title, center_title_area);
-
-        frame.render_widget(&self.workflow_table, body_area);
+    pub fn render_workflow_table(&mut self, frame: &mut Frame, area: layout::Rect) {
+        frame.render_widget(&self.workflow_table, area);
     }
 
     fn title(&self) -> String {
@@ -180,60 +175,92 @@ impl App {
 
     pub async fn scroll_current_view_down(&mut self) {
         match self.current_view {
-            CurrentView::WorkflowTable => self.workflow_table.next_row().await,
-            CurrentView::ScheduleTable => panic!("not implemented"),
+            View::WorkflowTable => self.workflow_table.next_row().await,
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 
     pub fn is_current_view_at_bottom(&self) -> bool {
         match self.current_view {
-            CurrentView::WorkflowTable => self.workflow_table.is_on_last_row(),
-            CurrentView::ScheduleTable => panic!("not implemented"),
+            View::WorkflowTable => self.workflow_table.is_on_last_row(),
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 
     pub fn scroll_current_view_up(&mut self) {
         match self.current_view {
-            CurrentView::WorkflowTable => self.workflow_table.previous_row(),
-            CurrentView::ScheduleTable => panic!("not implemented"),
+            View::WorkflowTable => self.workflow_table.previous_row(),
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 
     pub async fn reload_current_view(&self) {
         match self.current_view {
-            CurrentView::WorkflowTable => self.workflow_table.reload().await,
-            CurrentView::ScheduleTable => panic!("not implemented"),
+            View::WorkflowTable => self.workflow_table.reload().await,
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 
     pub fn is_current_view_loading(&self) -> bool {
         match self.current_view {
-            CurrentView::WorkflowTable => self.workflow_table.is_loading(),
-            CurrentView::ScheduleTable => panic!("not implemented"),
+            View::WorkflowTable => self.workflow_table.is_loading(),
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.current_mode = mode;
+    }
+
     pub async fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(key_event) => {
-                match key_event.code {
-                    // Exit application on `ESC` or `q`
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        self.quit();
+        match self.current_mode {
+            Mode::Insert => match event {
+                Event::Key(key_event) => match key_event.code {
+                    KeyCode::Esc => {
+                        self.set_mode(Mode::Normal);
                     }
                     // Exit application on `Ctrl-C`
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         if key_event.modifiers == KeyModifiers::CONTROL {
                             self.quit();
+                        } else {
+                            self.workflow_table.handle_insert(key_event.code);
                         }
                     }
-                    KeyCode::Char('j') | KeyCode::Down => self.scroll_current_view_down().await,
-                    KeyCode::Char('k') | KeyCode::Up => self.scroll_current_view_up(),
-                    KeyCode::Char('r') | KeyCode::Right => self.reload_current_view().await,
+                    key => {
+                        self.workflow_table.handle_insert(key);
+                    }
+                },
+                _ => {}
+            },
+            Mode::Normal => {
+                match event {
+                    Event::Key(key_event) => {
+                        match key_event.code {
+                            // Exit application on `ESC` or `q`
+                            KeyCode::Esc => {
+                                self.quit();
+                            }
+                            KeyCode::Char('i') => {
+                                self.set_mode(Mode::Insert);
+                            }
+                            // Exit application on `Ctrl-C`
+                            KeyCode::Char('c') | KeyCode::Char('C') => {
+                                if key_event.modifiers == KeyModifiers::CONTROL {
+                                    self.quit();
+                                }
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                self.scroll_current_view_down().await
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => self.scroll_current_view_up(),
+                            KeyCode::Char('r') | KeyCode::Right => self.reload_current_view().await,
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
-            _ => {}
         }
     }
 }
