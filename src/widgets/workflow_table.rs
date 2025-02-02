@@ -1,11 +1,8 @@
-use std::error::Error;
-use std::ops;
-use std::ops::Deref;
 use std::sync;
 
 use crossterm::event;
 use ratatui::{buffer, layout, style, style::palette::tailwind, style::Stylize, text, widgets};
-use temporal_client::{self, tonic::Status, WorkflowClientTrait};
+use temporal_client::{self, WorkflowClientTrait};
 use temporal_sdk_core_protos::temporal::api::{
     common::v1::WorkflowType, workflow::v1::WorkflowExecutionInfo,
     workflowservice::v1::ListWorkflowExecutionsResponse,
@@ -14,12 +11,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time;
 
-const PALETTES: [tailwind::Palette; 4] = [
-    tailwind::BLUE,
-    tailwind::EMERALD,
-    tailwind::INDIGO,
-    tailwind::RED,
-];
+use crate::theme::Theme;
 
 const ITEM_HEIGHT: usize = 1;
 
@@ -29,7 +21,7 @@ pub struct WorkflowTableWidget {
     temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     sender: sync::Arc<Option<mpsc::Sender<Message>>>,
     page_size: u32,
-    colors: TableColors,
+    theme: Theme,
     last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
     query: sync::Arc<sync::RwLock<QueryInput>>,
 }
@@ -39,6 +31,7 @@ pub struct QueryInput {
     query: Option<String>,
     placeholder: String,
     cursor: usize,
+    theme: Theme,
 }
 
 impl Default for QueryInput {
@@ -47,16 +40,18 @@ impl Default for QueryInput {
             query: None,
             placeholder: "Enter a query".to_string(),
             cursor: 0,
+            theme: Theme::default(),
         }
     }
 }
 
 impl QueryInput {
-    pub fn new(placeholder: &str) -> Self {
+    pub fn new(placeholder: &str, theme: Theme) -> Self {
         Self {
             query: None,
             placeholder: placeholder.to_string(),
             cursor: 0,
+            theme,
         }
     }
 
@@ -124,7 +119,8 @@ impl widgets::Widget for &QueryInput {
     fn render(self, area: layout::Rect, buf: &mut buffer::Buffer) {
         let input_block = widgets::Block::bordered()
             .borders(widgets::Borders::ALL)
-            .border_style(style::Style::new().fg(tailwind::BLUE.c400));
+            .border_type(widgets::BorderType::Rounded)
+            .border_style(style::Style::new().fg(self.theme.border));
 
         let query_str = match self.query.as_ref() {
             Some(q) => q.as_str(),
@@ -144,6 +140,7 @@ impl widgets::Widget for &QueryInput {
             cursor_char_span,
             query_end_span,
         ]))
+        .fg(self.theme.foreground)
         .block(input_block);
 
         widgets::Widget::render(input_text, area, buf);
@@ -157,37 +154,6 @@ struct WorkflowTableState {
     loading_state: LoadingState,
     table_state: widgets::TableState,
     scrollbar_state: widgets::ScrollbarState,
-}
-
-#[derive(Debug, Clone)]
-struct TableColors {
-    buffer_bg: style::Color,
-    header_bg: style::Color,
-    header_fg: style::Color,
-    row_fg: style::Color,
-    selected_row_style_fg: style::Color,
-    selected_column_style_fg: style::Color,
-    selected_cell_style_fg: style::Color,
-    normal_row_color: style::Color,
-    alt_row_color: style::Color,
-    footer_border_color: style::Color,
-}
-
-impl TableColors {
-    const fn new(color: &tailwind::Palette) -> Self {
-        Self {
-            buffer_bg: tailwind::SLATE.c950,
-            header_bg: color.c900,
-            header_fg: tailwind::SLATE.c200,
-            row_fg: tailwind::SLATE.c200,
-            selected_row_style_fg: color.c400,
-            selected_column_style_fg: color.c400,
-            selected_cell_style_fg: color.c600,
-            normal_row_color: tailwind::SLATE.c950,
-            alt_row_color: tailwind::SLATE.c900,
-            footer_border_color: color.c400,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -248,17 +214,7 @@ impl From<&WorkflowExecutionStatus> for String {
 impl From<&WorkflowExecutionStatus> for widgets::Cell<'_> {
     fn from(status: &WorkflowExecutionStatus) -> Self {
         let s = String::from(status);
-        let cell = widgets::Cell::new(s);
-        match status {
-            WorkflowExecutionStatus::Unspecified => cell.bg(tailwind::GRAY.c300),
-            WorkflowExecutionStatus::Running => cell.bg(tailwind::INDIGO.c500),
-            WorkflowExecutionStatus::Completed => cell.bg(tailwind::GREEN.c600),
-            WorkflowExecutionStatus::Failed => cell.bg(tailwind::RED.c600),
-            WorkflowExecutionStatus::Canceled => cell.bg(tailwind::YELLOW.c600),
-            WorkflowExecutionStatus::Terminated => cell.fg(tailwind::RED.c600),
-            WorkflowExecutionStatus::ContinuedAsNew => cell.bg(tailwind::GRAY.c300),
-            WorkflowExecutionStatus::TimedOut => cell.bg(tailwind::RED.c600),
-        }
+        widgets::Cell::new(s)
     }
 }
 
@@ -287,6 +243,7 @@ enum Message {
 impl WorkflowTableWidget {
     pub fn new(
         temporal_client: &sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
+        theme: Theme,
         page_size: u32,
     ) -> Self {
         Self {
@@ -294,9 +251,12 @@ impl WorkflowTableWidget {
             temporal_client: temporal_client.clone(),
             sender: sync::Arc::new(None),
             page_size,
-            colors: TableColors::new(&PALETTES[0]),
+            theme,
             last_reload: sync::Arc::new(sync::RwLock::new(None)),
-            query: sync::Arc::new(sync::RwLock::new(QueryInput::default())),
+            query: sync::Arc::new(sync::RwLock::new(QueryInput {
+                theme,
+                ..QueryInput::default()
+            })),
         }
     }
 
@@ -551,7 +511,7 @@ impl widgets::Widget for &WorkflowTableWidget {
         };
 
         let last_reload_title = widgets::Paragraph::new(text::Text::from(last_reload_string))
-            .style(style::Style::new().fg(tailwind::SLATE.c200))
+            .style(style::Style::new().fg(self.theme.foreground))
             .right_aligned();
 
         let query_input = self.query.read().unwrap();
@@ -559,21 +519,27 @@ impl widgets::Widget for &WorkflowTableWidget {
         widgets::Widget::render(last_reload_title, header_right_area, buf);
 
         let table_block = widgets::Block::bordered()
-            .title(text::Line::from("WORKFLOWS").centered())
+            .title(
+                text::Line::from("WORKFLOWS")
+                    .centered()
+                    .fg(self.theme.header_foreground)
+                    .bold(),
+            )
             .border_type(widgets::BorderType::Rounded)
-            .border_style(style::Style::new().fg(tailwind::BLUE.c400));
+            .border_style(style::Style::new().fg(self.theme.border))
+            .bg(self.theme.background);
 
         let mut state = self.state.write().unwrap();
         let header_style = style::Style::default()
-            .fg(self.colors.header_fg)
-            .bg(self.colors.header_bg);
+            .fg(self.theme.header_foreground)
+            .bg(self.theme.header_background);
         let selected_row_style = style::Style::default()
             .add_modifier(style::Modifier::REVERSED)
-            .fg(self.colors.selected_row_style_fg);
-        let selected_col_style = style::Style::default().fg(self.colors.selected_column_style_fg);
+            .fg(self.theme.selection_background);
+        let selected_col_style = style::Style::default().fg(self.theme.selection_background);
         let selected_cell_style = style::Style::default()
             .add_modifier(style::Modifier::REVERSED)
-            .fg(self.colors.selected_cell_style_fg);
+            .fg(self.theme.selection_background);
 
         let header = [
             "Status",
@@ -595,12 +561,40 @@ impl widgets::Widget for &WorkflowTableWidget {
             .enumerate()
             .map(|(i, execution)| {
                 let color = match i % 2 {
-                    0 => self.colors.normal_row_color,
-                    _ => self.colors.alt_row_color,
+                    0 => self.theme.background,
+                    _ => self.theme.alt_background,
                 };
-                widgets::Row::from(execution)
-                    .style(style::Style::new().fg(self.colors.row_fg).bg(color))
-                    .height(1)
+                let status_color = match execution.status {
+                    WorkflowExecutionStatus::Unspecified => self.theme.cancelled_background,
+                    WorkflowExecutionStatus::Running => self.theme.running_background,
+                    WorkflowExecutionStatus::Completed => self.theme.success_background,
+                    WorkflowExecutionStatus::Failed => self.theme.failure_background,
+                    WorkflowExecutionStatus::Canceled => self.theme.cancelled_background,
+                    WorkflowExecutionStatus::Terminated => self.theme.failure_background,
+                    WorkflowExecutionStatus::ContinuedAsNew => self.theme.cancelled_background,
+                    WorkflowExecutionStatus::TimedOut => self.theme.failure_background,
+                };
+
+                widgets::Row::new(vec![
+                    widgets::Cell::from(&execution.status).bg(status_color),
+                    widgets::Cell::new(execution.r#type.clone()),
+                    widgets::Cell::new(execution.workflow_id.clone()),
+                    widgets::Cell::new(execution.task_queue.clone()),
+                    widgets::Cell::new(
+                        execution
+                            .start_time
+                            .and_then(|dt| Some(format!("{}", dt.format("%y-%m-%d %H:%M:%S %Z"))))
+                            .unwrap_or("".to_string()),
+                    ),
+                    widgets::Cell::new(
+                        execution
+                            .close_time
+                            .and_then(|dt| Some(format!("{}", dt.format("%y-%m-%d %H:%M:%S %Z"))))
+                            .unwrap_or("".to_string()),
+                    ),
+                ])
+                .style(style::Style::new().fg(self.theme.foreground).bg(color))
+                .height(1)
             });
         let bar = " █ ";
         let table = widgets::Table::new(
@@ -625,33 +619,10 @@ impl widgets::Widget for &WorkflowTableWidget {
             bar.into(),
             "".into(),
         ]))
-        .bg(self.colors.buffer_bg)
+        .bg(self.theme.background)
         .highlight_spacing(widgets::HighlightSpacing::Always);
 
         widgets::StatefulWidget::render(table, body_area, buf, &mut state.table_state);
-    }
-}
-
-impl From<&WorkflowExecutionRow> for widgets::Row<'_> {
-    fn from(execution: &WorkflowExecutionRow) -> Self {
-        widgets::Row::new(vec![
-            widgets::Cell::from(&execution.status),
-            widgets::Cell::new(execution.r#type.clone()),
-            widgets::Cell::new(execution.workflow_id.clone()),
-            widgets::Cell::new(execution.task_queue.clone()),
-            widgets::Cell::new(
-                execution
-                    .start_time
-                    .and_then(|dt| Some(format!("{}", dt.format("%y-%m-%d %H:%M:%S %Z"))))
-                    .unwrap_or("".to_string()),
-            ),
-            widgets::Cell::new(
-                execution
-                    .close_time
-                    .and_then(|dt| Some(format!("{}", dt.format("%y-%m-%d %H:%M:%S %Z"))))
-                    .unwrap_or("".to_string()),
-            ),
-        ])
     }
 }
 

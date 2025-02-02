@@ -5,29 +5,17 @@ use std::sync;
 use std::time;
 
 use crossterm::event;
-use ratatui::{
-    backend::Backend,
-    layout, style,
-    style::{palette::material, palette::tailwind, Color, Modifier, Style, Stylize},
-    symbols, text, widgets, Frame,
-};
-use temporal_client::{self, Client, ClientOptions, ClientOptionsBuilder, RetryClient};
+use ratatui::{backend::Backend, layout, style, style::Stylize, symbols, text, widgets, Frame};
+use temporal_client::{self, ClientOptionsBuilder};
 use tokio::task;
 use url::Url;
 
 use crate::{
-    event::Event, settings::Settings, tui::Tui, widgets::workflow_table::WorkflowTableWidget,
+    event::Event, settings::Settings, theme::Theme, tui::Tui,
+    widgets::workflow_table::WorkflowTableWidget,
 };
 
 const FOOTER_INFO_TEXT: [&str; 1] = ["(q) quit | (↑/j) move up | (↓/k) move down | (r) reload"];
-const BORDER_STYLE: Style = Style::new()
-    .fg(material::INDIGO.a100)
-    .bg(material::GRAY.c500);
-const ROW_BG: Color = material::GRAY.c500;
-const SELECTED_STYLE: Style = Style::new()
-    .bg(material::GRAY.c50)
-    .add_modifier(Modifier::BOLD);
-const TEXT_FG_COLOR: Color = material::WHITE;
 
 /// Application result type.
 pub type AppResult<T> = std::result::Result<T, anyhow::Error>;
@@ -47,6 +35,7 @@ pub struct App {
     namespace: String,
     view: View,
     mode: Mode,
+    theme: Theme,
 }
 
 #[derive(Debug)]
@@ -58,6 +47,7 @@ pub enum View {
 impl App {
     /// Constructs a new instance of [`App`].
     pub async fn new(settings: &Settings) -> Result<Self, anyhow::Error> {
+        let theme = settings.theme()?;
         let mut temporal_url = Url::parse(&settings.host)?;
         temporal_url
             .set_port(Some(settings.port))
@@ -97,7 +87,7 @@ impl App {
         let namespace = settings.namespace.clone();
         let temporal_client = sync::Arc::new(client_options.connect(&namespace, None).await?);
 
-        let workflow_table = WorkflowTableWidget::new(&temporal_client, 48);
+        let workflow_table = WorkflowTableWidget::new(&temporal_client, theme, 48);
 
         Ok(App {
             running: true,
@@ -105,6 +95,7 @@ impl App {
             namespace,
             view: View::WorkflowTable(workflow_table),
             mode: Mode::Normal,
+            theme,
         })
     }
 
@@ -147,8 +138,13 @@ impl App {
 
     pub fn render_view(&mut self, frame: &mut Frame) {
         let app_block = widgets::Block::bordered()
-            .title(text::Line::from(self.title()).centered())
-            .borders(widgets::Borders::NONE);
+            .title(
+                text::Line::from(self.title())
+                    .centered()
+                    .fg(self.theme.foreground),
+            )
+            .borders(widgets::Borders::NONE)
+            .bg(self.theme.background);
 
         let app_area = app_block.inner(frame.area());
         frame.render_widget(&app_block, frame.area());
@@ -165,8 +161,8 @@ impl App {
         let footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
             .style(
                 style::Style::new()
-                    .fg(tailwind::SLATE.c200)
-                    .bg(tailwind::SLATE.c950),
+                    .fg(self.theme.footer_foreground)
+                    .bg(self.theme.footer_background),
             )
             .centered()
             .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
