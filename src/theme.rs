@@ -22,7 +22,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        SOLARIZED_DARK_HIGH_CONTRAST
+        NORD_DARK
     }
 }
 
@@ -41,4 +41,21 @@ pub const SOLARIZED_DARK_HIGH_CONTRAST: Theme = Theme {
     failure_background: style::Color::from_u32(0x582b29),
     running_background: style::Color::from_u32(0x004363),
     cancelled_background: style::Color::from_u32(0x928374),
+};
+
+pub const NORD_DARK: Theme = Theme {
+    background: style::Color::from_u32(0x2e3440),
+    foreground: style::Color::from_u32(0xeceff4),
+    alt_background: style::Color::from_u32(0x3b4252),
+    selection_foreground: style::Color::from_u32(0x3b4252),
+    selection_background: style::Color::from_u32(0xd8dee9),
+    header_foreground: style::Color::from_u32(0xeceff4),
+    header_background: style::Color::from_u32(0x2e3440),
+    footer_foreground: style::Color::from_u32(0xeceff4),
+    footer_background: style::Color::from_u32(0x2e3440),
+    border: style::Color::from_u32(0x81a1c1),
+    success_background: style::Color::from_u32(0xa3be8c),
+    failure_background: style::Color::from_u32(0xbf616a),
+    running_background: style::Color::from_u32(0x5e81ac),
+    cancelled_background: style::Color::from_u32(0x4c566a),
 };
