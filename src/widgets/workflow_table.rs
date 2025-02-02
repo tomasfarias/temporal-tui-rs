@@ -300,16 +300,12 @@ impl WorkflowTableWidget {
         }
     }
 
-    pub async fn run(&mut self, reload_immediatelly: bool) {
+    pub fn run(&mut self) {
         let (tx, rx) = mpsc::channel(32);
         *sync::Arc::get_mut(&mut self.sender).unwrap() = Some(tx);
 
         let this = self.clone(); // clone the widget to pass to the background task
         tokio::spawn(this.fetch_workflows(rx));
-
-        if reload_immediatelly {
-            self.reload().await;
-        }
     }
 
     async fn fetch_workflows(mut self, mut receiver: mpsc::Receiver<Message>) {
@@ -517,7 +513,7 @@ impl WorkflowTableWidget {
         }
     }
 
-    pub fn handle_insert(&mut self, key: event::KeyCode) {
+    pub fn handle_insert_key(&mut self, key: event::KeyCode) {
         match key {
             event::KeyCode::Char(_) | event::KeyCode::Backspace | event::KeyCode::Enter => {
                 let mut query_input = self.query.write().unwrap();
@@ -527,12 +523,11 @@ impl WorkflowTableWidget {
         }
     }
 
-    pub fn handle_normal(&mut self, key: event::KeyCode) {
+    pub async fn handle_normal_key(&mut self, key: event::KeyCode) {
         match key {
-            event::KeyCode::Char(_) => {
-                let mut query_input = self.query.write().unwrap();
-                query_input.handle_key(key);
-            }
+            event::KeyCode::Char('j') | event::KeyCode::Down => self.next_row().await,
+            event::KeyCode::Char('k') | event::KeyCode::Up => self.previous_row(),
+            event::KeyCode::Char('r') | event::KeyCode::Right => self.reload().await,
             _ => {}
         }
     }

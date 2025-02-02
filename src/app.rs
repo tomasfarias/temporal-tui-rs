@@ -4,7 +4,7 @@ use std::io::Read;
 use std::sync;
 use std::time;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event;
 use ratatui::{
     backend::Backend,
     layout, style,
@@ -42,17 +42,16 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct App {
     /// Is the application running?
-    pub running: bool,
-    pub temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
-    pub namespace: String,
-    current_view: View,
-    pub workflow_table: WorkflowTableWidget,
-    pub current_mode: Mode,
+    running: bool,
+    temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
+    namespace: String,
+    view: View,
+    mode: Mode,
 }
 
 #[derive(Debug)]
 pub enum View {
-    WorkflowTable,
+    WorkflowTable(WorkflowTableWidget),
     ScheduleTable,
 }
 
@@ -104,16 +103,15 @@ impl App {
             running: true,
             temporal_client,
             namespace,
-            workflow_table,
-            current_view: View::WorkflowTable,
-            current_mode: Mode::Normal,
+            view: View::WorkflowTable(workflow_table),
+            mode: Mode::Normal,
         })
     }
 
     pub async fn run<B: Backend>(mut self, mut terminal: Tui<B>) -> Result<(), anyhow::Error> {
         terminal.init()?;
 
-        self.workflow_table.run(true).await;
+        self.run_view().await;
 
         let period = time::Duration::from_secs_f32(1.0 / 60.0);
         let mut interval = tokio::time::interval(period);
@@ -129,6 +127,16 @@ impl App {
         Ok(())
     }
 
+    pub async fn run_view(&mut self) {
+        match &mut self.view {
+            View::WorkflowTable(workflow_table) => {
+                workflow_table.run();
+                workflow_table.reload().await;
+            }
+            View::ScheduleTable => panic!("not implemented"),
+        }
+    }
+
     /// Handles the tick event of the terminal.
     pub fn tick(&self) {}
 
@@ -137,7 +145,7 @@ impl App {
         self.running = false;
     }
 
-    pub fn render_current_view(&mut self, frame: &mut Frame) {
+    pub fn render_view(&mut self, frame: &mut Frame) {
         let app_block = widgets::Block::bordered()
             .title(text::Line::from(self.title()).centered())
             .borders(widgets::Borders::NONE);
@@ -149,8 +157,8 @@ impl App {
             &layout::Layout::vertical([layout::Constraint::Fill(1), layout::Constraint::Length(2)]);
         let [body_area, footer_area] = vertical.areas(app_area);
 
-        match self.current_view {
-            View::WorkflowTable => self.render_workflow_table(frame, body_area),
+        match &self.view {
+            View::WorkflowTable(workflow_table) => frame.render_widget(workflow_table, body_area),
             _ => panic!("Unsupported view"),
         };
 
@@ -165,70 +173,32 @@ impl App {
         frame.render_widget(&footer, footer_area);
     }
 
-    pub fn render_workflow_table(&mut self, frame: &mut Frame, area: layout::Rect) {
-        frame.render_widget(&self.workflow_table, area);
-    }
-
     fn title(&self) -> String {
         format!("Temporal TUI - {}", self.namespace)
     }
 
-    pub async fn scroll_current_view_down(&mut self) {
-        match self.current_view {
-            View::WorkflowTable => self.workflow_table.next_row().await,
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
-
-    pub fn is_current_view_at_bottom(&self) -> bool {
-        match self.current_view {
-            View::WorkflowTable => self.workflow_table.is_on_last_row(),
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
-
-    pub fn scroll_current_view_up(&mut self) {
-        match self.current_view {
-            View::WorkflowTable => self.workflow_table.previous_row(),
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
-
-    pub async fn reload_current_view(&self) {
-        match self.current_view {
-            View::WorkflowTable => self.workflow_table.reload().await,
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
-
-    pub fn is_current_view_loading(&self) -> bool {
-        match self.current_view {
-            View::WorkflowTable => self.workflow_table.is_loading(),
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
-
     pub fn set_mode(&mut self, mode: Mode) {
-        self.current_mode = mode;
+        self.mode = mode;
     }
 
     pub async fn handle_event(&mut self, event: &Event) {
-        match self.current_mode {
+        match self.mode {
             Mode::Insert => match event {
                 Event::Key(key_event) => match key_event.code {
-                    KeyCode::Esc => {
+                    // Switch to Normal mode
+                    event::KeyCode::Esc => {
                         self.set_mode(Mode::Normal);
                     }
                     // Exit application on `Ctrl-C`
-                    KeyCode::Char('c') | KeyCode::Char('C') => {
-                        if key_event.modifiers == KeyModifiers::CONTROL {
+                    event::KeyCode::Char('c') | event::KeyCode::Char('C') => {
+                        if key_event.modifiers == event::KeyModifiers::CONTROL {
                             self.quit();
                         } else {
-                            self.workflow_table.handle_insert(key_event.code);
+                            self.handle_insert_key(key_event.code);
                         }
                     }
                     key => {
-                        self.workflow_table.handle_insert(key);
+                        self.handle_insert_key(key);
                     }
                 },
                 _ => {}
@@ -237,30 +207,44 @@ impl App {
                 match event {
                     Event::Key(key_event) => {
                         match key_event.code {
-                            // Exit application on `ESC` or `q`
-                            KeyCode::Esc => {
-                                self.quit();
-                            }
-                            KeyCode::Char('i') => {
+                            // Switch to Insert mode
+                            event::KeyCode::Char('i') => {
                                 self.set_mode(Mode::Insert);
                             }
+                            // Exit application on `ESC` or `q`
+                            event::KeyCode::Esc => {
+                                self.quit();
+                            }
                             // Exit application on `Ctrl-C`
-                            KeyCode::Char('c') | KeyCode::Char('C') => {
-                                if key_event.modifiers == KeyModifiers::CONTROL {
+                            event::KeyCode::Char('c') | event::KeyCode::Char('C') => {
+                                if key_event.modifiers == event::KeyModifiers::CONTROL {
                                     self.quit();
+                                } else {
+                                    self.handle_normal_key(key_event.code).await;
                                 }
                             }
-                            KeyCode::Char('j') | KeyCode::Down => {
-                                self.scroll_current_view_down().await
+                            key => {
+                                self.handle_normal_key(key).await;
                             }
-                            KeyCode::Char('k') | KeyCode::Up => self.scroll_current_view_up(),
-                            KeyCode::Char('r') | KeyCode::Right => self.reload_current_view().await,
-                            _ => {}
                         }
                     }
                     _ => {}
                 }
             }
+        }
+    }
+
+    pub fn handle_insert_key(&mut self, key: event::KeyCode) {
+        match &mut self.view {
+            View::WorkflowTable(workflow_table) => workflow_table.handle_insert_key(key),
+            View::ScheduleTable => panic!("not implemented"),
+        }
+    }
+
+    pub async fn handle_normal_key(&mut self, key: event::KeyCode) {
+        match &mut self.view {
+            View::WorkflowTable(workflow_table) => workflow_table.handle_normal_key(key).await,
+            View::ScheduleTable => panic!("not implemented"),
         }
     }
 }

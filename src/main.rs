@@ -15,7 +15,6 @@ pub mod event;
 pub mod handler;
 pub mod settings;
 pub mod tui;
-pub mod ui;
 pub mod widgets;
 
 #[tokio::main]
