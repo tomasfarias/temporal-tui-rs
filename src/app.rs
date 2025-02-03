@@ -11,7 +11,7 @@ use tokio::task;
 use url::Url;
 
 use crate::{
-    event::Event, settings::Settings, theme::Theme, tui::Tui,
+    event::Event, settings::Settings, theme::Theme, tui::Tui, widgets::workflow::WorkflowWidget,
     widgets::workflow_table::WorkflowTableWidget,
 };
 
@@ -20,27 +20,48 @@ const FOOTER_INFO_TEXT: [&str; 1] = ["(q) quit | (↑/j) move up | (↓/k) move 
 /// Application result type.
 pub type AppResult<T> = std::result::Result<T, anyhow::Error>;
 
+/// Modes the application can be in.
 #[derive(Debug)]
 pub enum Mode {
+    /// Default [`Mode`] that allows navigation.
     Normal,
+    /// [`Mode`] enabled when needing to take user input.
     Insert,
 }
 
-/// Application.
+impl<'m> Mode {
+    pub fn as_str(&'m self) -> &'m str {
+        match self {
+            Mode::Normal => "NORMAL",
+            Mode::Insert => "INSERT",
+        }
+    }
+}
+
+/// The main Temporal TUI application.
 #[derive(Debug)]
 pub struct App {
     /// Is the application running?
     running: bool,
     temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
+    /// Temporal namespace we are connected to.
     namespace: String,
+    /// The current [`View`] being displayed.
     view: View,
+    /// The current [`Mode`] the [`App`] is in.
     mode: Mode,
+    /// The [`App`]'s [`Theme`] defines its colors.
     theme: Theme,
 }
 
+/// Enumeration of potential views the [`App`] can display.
 #[derive(Debug)]
 pub enum View {
+    /// A view of all Temporal workflow executions rendered by [`WorkflowTableWidget`].
     WorkflowTable(WorkflowTableWidget),
+    /// A view of a single workflow execution.
+    Workflow(WorkflowWidget),
+    /// A view of all Temporal schedules.
     ScheduleTable,
 }
 
@@ -124,6 +145,10 @@ impl App {
                 workflow_table.run();
                 workflow_table.reload().await;
             }
+            View::Workflow(workflow) => {
+                workflow.run();
+                workflow.reload().await;
+            }
             View::ScheduleTable => panic!("not implemented"),
         }
     }
@@ -136,6 +161,7 @@ impl App {
         self.running = false;
     }
 
+    /// Render the current view on display with a header and footer.
     pub fn render_view(&mut self, frame: &mut Frame) {
         let app_block = widgets::Block::bordered()
             .title(
@@ -143,7 +169,8 @@ impl App {
                     .centered()
                     .fg(self.theme.foreground),
             )
-            .borders(widgets::Borders::NONE)
+            .border_type(widgets::BorderType::Rounded)
+            .border_style(self.theme.border)
             .bg(self.theme.background);
 
         let app_area = app_block.inner(frame.area());
@@ -155,10 +182,19 @@ impl App {
 
         match &self.view {
             View::WorkflowTable(workflow_table) => frame.render_widget(workflow_table, body_area),
-            _ => panic!("Unsupported view"),
+            View::Workflow(workflow) => frame.render_widget(workflow, body_area),
+            _ => panic!("not implemented"),
         };
 
-        let footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
+        let footer_horizontal = &layout::Layout::horizontal([
+            layout::Constraint::Length(10),
+            layout::Constraint::Fill(1),
+            // Just to allow aligning the keybinds in the center, currently this third area is not used.
+            layout::Constraint::Length(10),
+        ]);
+        let [footer_left_area, footer_center_area, _] = footer_horizontal.areas(footer_area);
+
+        let mode_footer = widgets::Paragraph::new(text::Line::from(self.mode.as_str()))
             .style(
                 style::Style::new()
                     .fg(self.theme.footer_foreground)
@@ -166,7 +202,17 @@ impl App {
             )
             .centered()
             .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
-        frame.render_widget(&footer, footer_area);
+        frame.render_widget(&mode_footer, footer_left_area);
+
+        let kebyinds_footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
+            .style(
+                style::Style::new()
+                    .fg(self.theme.footer_foreground)
+                    .bg(self.theme.footer_background),
+            )
+            .centered()
+            .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
+        frame.render_widget(&kebyinds_footer, footer_center_area);
     }
 
     fn title(&self) -> String {
@@ -211,6 +257,26 @@ impl App {
                             event::KeyCode::Esc => {
                                 self.quit();
                             }
+                            event::KeyCode::Enter => {
+                                if let View::WorkflowTable(workflow_table) = &self.view {
+                                    if let Some(workflow_id) =
+                                        workflow_table.get_selected_workflow_id()
+                                    {
+                                        let workflow = View::Workflow(WorkflowWidget::new(
+                                            &self.temporal_client,
+                                            &workflow_id,
+                                            None,
+                                            self.theme,
+                                        ));
+                                        self.view = workflow;
+                                        self.run_view().await;
+                                    } else {
+                                        self.handle_normal_key(key_event.code).await;
+                                    }
+                                } else {
+                                    self.handle_normal_key(key_event.code).await;
+                                }
+                            }
                             // Exit application on `Ctrl-C`
                             event::KeyCode::Char('c') | event::KeyCode::Char('C') => {
                                 if key_event.modifiers == event::KeyModifiers::CONTROL {
@@ -233,6 +299,7 @@ impl App {
     pub fn handle_insert_key(&mut self, key: event::KeyCode) {
         match &mut self.view {
             View::WorkflowTable(workflow_table) => workflow_table.handle_insert_key(key),
+            View::Workflow(_) => panic!("not implemented"),
             View::ScheduleTable => panic!("not implemented"),
         }
     }
@@ -240,6 +307,7 @@ impl App {
     pub async fn handle_normal_key(&mut self, key: event::KeyCode) {
         match &mut self.view {
             View::WorkflowTable(workflow_table) => workflow_table.handle_normal_key(key).await,
+            View::Workflow(_) => panic!("not implemented"),
             View::ScheduleTable => panic!("not implemented"),
         }
     }

@@ -1,7 +1,7 @@
 use std::sync;
 
 use crossterm::event;
-use ratatui::{buffer, layout, style, style::palette::tailwind, style::Stylize, text, widgets};
+use ratatui::{buffer, layout, style, style::Stylize, text, widgets};
 use temporal_client::{self, WorkflowClientTrait};
 use temporal_sdk_core_protos::temporal::api::{
     common::v1::WorkflowType, workflow::v1::WorkflowExecutionInfo,
@@ -12,20 +12,11 @@ use tokio::task;
 use tokio::time;
 
 use crate::theme::Theme;
+use crate::widgets::common::{LoadingState, Message, WorkflowExecution, WorkflowExecutionStatus};
 
 const ITEM_HEIGHT: usize = 1;
 
-#[derive(Debug, Clone)]
-pub struct WorkflowTableWidget {
-    state: sync::Arc<sync::RwLock<WorkflowTableState>>,
-    temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
-    sender: sync::Arc<Option<mpsc::Sender<Message>>>,
-    page_size: u32,
-    theme: Theme,
-    last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
-    query: sync::Arc<sync::RwLock<QueryInput>>,
-}
-
+/// A widget to input a query for Temporal.
 #[derive(Debug, Clone)]
 pub struct QueryInput {
     query: Option<String>,
@@ -38,7 +29,7 @@ impl Default for QueryInput {
     fn default() -> Self {
         Self {
             query: None,
-            placeholder: "Enter a query".to_string(),
+            placeholder: "Enter a query...".to_string(),
             cursor: 0,
             theme: Theme::default(),
         }
@@ -147,97 +138,24 @@ impl widgets::Widget for &QueryInput {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkflowTableWidget {
+    state: sync::Arc<sync::RwLock<WorkflowTableState>>,
+    temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
+    sender: sync::Arc<Option<mpsc::Sender<Message>>>,
+    page_size: u32,
+    theme: Theme,
+    last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
+    query: sync::Arc<sync::RwLock<QueryInput>>,
+}
+
 #[derive(Debug, Default)]
 struct WorkflowTableState {
-    workflow_executions: Vec<WorkflowExecutionRow>,
+    workflow_executions: Vec<WorkflowExecution>,
     next_page_token: Option<Vec<u8>>,
     loading_state: LoadingState,
     table_state: widgets::TableState,
     scrollbar_state: widgets::ScrollbarState,
-}
-
-#[derive(Debug, Default)]
-struct WorkflowExecutionRow {
-    status: WorkflowExecutionStatus,
-    r#type: String,
-    workflow_id: String,
-    task_queue: String,
-    start_time: Option<chrono::DateTime<chrono::Utc>>,
-    close_time: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug)]
-enum WorkflowExecutionStatus {
-    Unspecified,
-    Running,
-    Completed,
-    Failed,
-    Canceled,
-    Terminated,
-    ContinuedAsNew,
-    TimedOut,
-}
-
-impl TryFrom<i32> for WorkflowExecutionStatus {
-    type Error = anyhow::Error;
-
-    fn try_from(status: i32) -> Result<Self, Self::Error> {
-        match status {
-            0 => Ok(WorkflowExecutionStatus::Unspecified),
-            1 => Ok(WorkflowExecutionStatus::Running),
-            2 => Ok(WorkflowExecutionStatus::Completed),
-            3 => Ok(WorkflowExecutionStatus::Failed),
-            4 => Ok(WorkflowExecutionStatus::Canceled),
-            5 => Ok(WorkflowExecutionStatus::Terminated),
-            6 => Ok(WorkflowExecutionStatus::ContinuedAsNew),
-            7 => Ok(WorkflowExecutionStatus::TimedOut),
-            i => Err(anyhow::anyhow!("invalid status: {}", i)),
-        }
-    }
-}
-
-impl From<&WorkflowExecutionStatus> for String {
-    fn from(status: &WorkflowExecutionStatus) -> Self {
-        match status {
-            WorkflowExecutionStatus::Unspecified => "Unspecified".to_string(),
-            WorkflowExecutionStatus::Running => "Running".to_string(),
-            WorkflowExecutionStatus::Completed => "Completed".to_string(),
-            WorkflowExecutionStatus::Failed => "Failed".to_string(),
-            WorkflowExecutionStatus::Canceled => "Canceled".to_string(),
-            WorkflowExecutionStatus::Terminated => "Terminated".to_string(),
-            WorkflowExecutionStatus::ContinuedAsNew => "Continued-As-New".to_string(),
-            WorkflowExecutionStatus::TimedOut => "Timed-Out".to_string(),
-        }
-    }
-}
-
-impl From<&WorkflowExecutionStatus> for widgets::Cell<'_> {
-    fn from(status: &WorkflowExecutionStatus) -> Self {
-        let s = String::from(status);
-        widgets::Cell::new(s)
-    }
-}
-
-impl Default for WorkflowExecutionStatus {
-    fn default() -> Self {
-        Self::Unspecified
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum LoadingState {
-    #[default]
-    Idle,
-    Reloaded,
-    Loading,
-    PageLoaded,
-    Error(String),
-}
-
-#[derive(Debug)]
-enum Message {
-    Reload,
-    LoadPage { page_token: Vec<u8> },
 }
 
 impl WorkflowTableWidget {
@@ -335,7 +253,7 @@ impl WorkflowTableWidget {
     }
 
     fn on_load(&mut self, response: ListWorkflowExecutionsResponse, clear: bool) {
-        let executions: Vec<WorkflowExecutionRow> = match response
+        let executions: Vec<WorkflowExecution> = match response
             .executions
             .into_iter()
             .map(TryInto::try_into)
@@ -491,6 +409,14 @@ impl WorkflowTableWidget {
             _ => {}
         }
     }
+
+    pub fn get_selected_workflow_id(&self) -> Option<String> {
+        let state = self.state.read().unwrap();
+        match state.table_state.selected() {
+            Some(i) => Some(state.workflow_executions[i].workflow_id.clone()),
+            None => None,
+        }
+    }
 }
 
 impl widgets::Widget for &WorkflowTableWidget {
@@ -623,30 +549,5 @@ impl widgets::Widget for &WorkflowTableWidget {
         .highlight_spacing(widgets::HighlightSpacing::Always);
 
         widgets::StatefulWidget::render(table, body_area, buf, &mut state.table_state);
-    }
-}
-
-impl TryFrom<WorkflowExecutionInfo> for WorkflowExecutionRow {
-    type Error = anyhow::Error;
-
-    fn try_from(execution_info: WorkflowExecutionInfo) -> Result<Self, Self::Error> {
-        Ok(WorkflowExecutionRow {
-            status: WorkflowExecutionStatus::try_from(execution_info.status)?,
-            r#type: execution_info
-                .r#type
-                .ok_or(anyhow::anyhow!("workflow execution has no type"))?
-                .name,
-            workflow_id: execution_info
-                .execution
-                .ok_or(anyhow::anyhow!("workflow execution has no workflow id"))?
-                .workflow_id,
-            task_queue: execution_info.task_queue,
-            start_time: execution_info.start_time.and_then(|start_time| {
-                chrono::DateTime::from_timestamp(start_time.seconds, start_time.nanos as u32)
-            }),
-            close_time: execution_info.close_time.and_then(|close_time| {
-                chrono::DateTime::from_timestamp(close_time.seconds, close_time.nanos as u32)
-            }),
-        })
     }
 }
