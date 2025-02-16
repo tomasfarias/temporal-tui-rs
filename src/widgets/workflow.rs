@@ -8,8 +8,9 @@ use std::collections;
 use std::sync;
 use temporal_client::WorkflowClientTrait;
 use temporal_sdk_core_protos::temporal::api::{
-    common::v1 as temporal_common, enums::v1 as enums, history::v1 as history, sdk::v1 as sdk,
-    workflow::v1 as workflow, workflowservice::v1 as service,
+    common::v1 as temporal_common, enums::v1 as enums, failure::v1 as failure,
+    history::v1 as history, sdk::v1 as sdk, workflow::v1 as workflow,
+    workflowservice::v1 as service,
 };
 use tokio::sync::mpsc;
 use tokio::task;
@@ -119,10 +120,54 @@ impl widgets::Widget for &Payload {
 }
 
 #[derive(Debug, Clone)]
-pub struct Failure {
+pub struct FailureWidget {
     message: String,
     source: String,
     stack_trace: String,
+}
+
+impl FailureWidget {
+    fn to_string_pretty(&self) -> String {
+        let dumped = serde_json::json!({
+            "message": self.message,
+            "stackTrace": self.stack_trace,
+        });
+
+        serde_json::to_string_pretty(&dumped).unwrap()
+    }
+}
+
+impl From<failure::Failure> for FailureWidget {
+    fn from(f: failure::Failure) -> Self {
+        Self {
+            message: f.message,
+            source: f.source,
+            stack_trace: f.stack_trace,
+        }
+    }
+}
+
+impl From<&failure::Failure> for FailureWidget {
+    fn from(f: &failure::Failure) -> Self {
+        Self {
+            message: f.message.clone(),
+            source: f.source.clone(),
+            stack_trace: f.stack_trace.clone(),
+        }
+    }
+}
+
+impl widgets::Widget for &FailureWidget {
+    fn render(self, area: layout::Rect, buf: &mut buffer::Buffer) {
+        let failure_block = widgets::Block::bordered()
+            .border_type(widgets::BorderType::Rounded)
+            .title("Failure");
+
+        widgets::Paragraph::new(self.to_string_pretty())
+            .block(failure_block)
+            .wrap(widgets::Wrap { trim: false })
+            .render(area, buf);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +182,7 @@ pub struct PendingActivity {
     maximum_attempts: u32,
     scheduled_time: Option<chrono::DateTime<chrono::Utc>>,
     expiration_time: Option<chrono::DateTime<chrono::Utc>>,
-    last_failure: Option<Failure>,
+    last_failure: Option<FailureWidget>,
     last_worker_identity: String,
     last_attempt_complete_time: Option<chrono::DateTime<chrono::Utc>>,
     next_attempt_schedule_time: Option<chrono::DateTime<chrono::Utc>>,
@@ -149,7 +194,7 @@ impl TryFrom<workflow::PendingActivityInfo> for PendingActivity {
     fn try_from(info: workflow::PendingActivityInfo) -> Result<Self, Self::Error> {
         let state = enums::PendingActivityState::try_from(info.state)?;
         let last_failure = if let Some(f) = info.last_failure {
-            Some(Failure {
+            Some(FailureWidget {
                 message: f.message,
                 source: f.source,
                 stack_trace: f.stack_trace,
@@ -392,6 +437,124 @@ impl widgets::Widget for &EventWidget {
                     ];
                     widgets::Paragraph::new(lines).render(area, buf);
                 }
+                history::history_event::Attributes::WorkflowTaskFailedEventAttributes(attrs) => {
+                    let areas = layout::Layout::vertical([
+                        layout::Constraint::Length(4),
+                        layout::Constraint::Fill(1),
+                    ]).split(area);
+
+
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Scheduled event ID: ".into(),
+                            text::Span::from(format!("{}", attrs.scheduled_event_id)),
+                        ]),
+                        text::Line::from(vec![
+                            "Started event ID: ".into(),
+                            text::Span::from(format!("{}", attrs.started_event_id)),
+                        ]),
+                        text::Line::from(vec![
+                            "Identity: ".into(),
+                            text::Span::from(&attrs.identity),
+                        ]),
+                        text::Line::from(vec![
+                            "Worker version: ".into(),
+                            text::Span::from(if let Some(ts) = &attrs.worker_version {
+                                &ts.build_id
+                            } else {
+                                "-"
+                            }),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(areas[0], buf);
+
+                    if let Some(failure) = &attrs.failure {
+                        let failure = FailureWidget::from(failure);
+                        failure.render(areas[1], buf);
+                    }
+                }
+                history::history_event::Attributes::WorkflowTaskTimedOutEventAttributes(attrs) => {
+                    let timeout_type = match attrs.timeout_type {
+                        1 => enums::TimeoutType::StartToClose,
+                        2 => enums::TimeoutType::ScheduleToStart,
+                        3 => enums::TimeoutType::ScheduleToClose,
+                        4 => enums::TimeoutType::Heartbeat,
+                        _ => enums::TimeoutType::Unspecified,
+                    };
+
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Scheduled event ID: ".into(),
+                            text::Span::from(format!("{}", attrs.scheduled_event_id)),
+                        ]),
+                        text::Line::from(vec![
+                            "Started event ID: ".into(),
+                            text::Span::from(format!("{}", attrs.started_event_id)),
+                        ]),
+                        text::Line::from(vec![
+                            "Timeout type: ".into(),
+                            text::Span::from(timeout_type.as_str_name()),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(area, buf);
+                }
+                history::history_event::Attributes::WorkflowExecutionCancelRequestedEventAttributes(attrs) => {
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Identity: ".into(),
+                            text::Span::from(&attrs.identity),
+                        ]),
+                        text::Line::from(vec![
+                            "Cause: ".into(),
+                            text::Span::from(&attrs.cause),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(area, buf);
+                }
+                history::history_event::Attributes::WorkflowExecutionCanceledEventAttributes(attrs) => {
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Workflow task completed event ID: ".into(),
+                            text::Span::from(format!("{}", attrs.workflow_task_completed_event_id)),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(area, buf);
+                }
+                history::history_event::Attributes::WorkflowExecutionFailedEventAttributes(attrs) => {
+                    let areas = layout::Layout::vertical([
+                        layout::Constraint::Length(2),
+                        layout::Constraint::Fill(1),
+                    ])
+                    .split(area);
+
+                    let retry_state = match attrs.retry_state {
+                        1 => enums::RetryState::InProgress,
+                        2 => enums::RetryState::NonRetryableFailure,
+                        3 => enums::RetryState::Timeout,
+                        4 => enums::RetryState::MaximumAttemptsReached,
+                        5 => enums::RetryState::RetryPolicyNotSet,
+                        6 => enums::RetryState::InternalServerError,
+                        7 => enums::RetryState::CancelRequested,
+                        _ => enums::RetryState::Unspecified,
+                    };
+
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Retry state: ".into(),
+                            text::Span::from(retry_state.as_str_name()),
+                        ]),
+                        text::Line::from(vec![
+                            "Workflow task completed event ID: ".into(),
+                            text::Span::from(attrs.workflow_task_completed_event_id.to_string()),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(areas[0], buf);
+
+                    if let Some(failure) = &attrs.failure {
+                        let failure = FailureWidget::from(failure);
+                        failure.render(areas[1], buf);
+                    }
+                }
                 history::history_event::Attributes::ActivityTaskScheduledEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
                         layout::Constraint::Length(10),
@@ -527,7 +690,7 @@ impl widgets::Widget for &EventWidget {
                     }
 
                     if let Some(payloads) = attrs.input.as_ref() {
-                        for p in payloads.payloads.iter() {
+                        for p in payloads.payloads.iter().take(1) {
                             let payload = Payload::from(p).with_title("Input");
                             payload.render(areas[3], buf);
                         }
@@ -549,7 +712,7 @@ impl widgets::Widget for &EventWidget {
                         ]),
                         text::Line::from(vec![
                             "Attempt: ".into(),
-                            text::Span::from(format!("{}", attrs.attempt)),
+                            text::Span::from(attrs.attempt.to_string()),
                         ]),
                         text::Line::from(vec![
                             "Worker version: ".into(),
@@ -585,8 +748,63 @@ impl widgets::Widget for &EventWidget {
                     widgets::Paragraph::new(lines).render(areas[0], buf);
 
                     if let Some(payloads) = attrs.result.as_ref() {
-                        for p in payloads.payloads.iter() {
+                        for p in payloads.payloads.iter().take(1) {
                             let payload = Payload::from(p).with_title("Result");
+                            payload.render(areas[1], buf);
+                        }
+                    }
+                }
+                history::history_event::Attributes::ActivityTaskCancelRequestedEventAttributes(attrs) => {
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Scheduled event ID: ".into(),
+                            text::Span::from(attrs.scheduled_event_id.to_string()),
+                        ]),
+                        text::Line::from(vec![
+                            "Workflow task completed event ID: ".into(),
+                            text::Span::from(attrs.workflow_task_completed_event_id.to_string()),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).render(area, buf);
+                }
+                history::history_event::Attributes::ActivityTaskCanceledEventAttributes(attrs) => {
+                    let areas = layout::Layout::vertical([
+                        layout::Constraint::Length(5),
+                        layout::Constraint::Fill(1),
+                    ])
+                        .split(area);
+
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Latest cancel requested event ID: ".into(),
+                            text::Span::from(attrs.latest_cancel_requested_event_id.to_string()),
+                        ]),
+                        text::Line::from(vec![
+                            "Scheduled event ID: ".into(),
+                            text::Span::from(attrs.scheduled_event_id.to_string()),
+                        ]),
+                        text::Line::from(vec![
+                            "Started event ID: ".into(),
+                            text::Span::from(attrs.started_event_id.to_string()),
+                        ]),
+                        text::Line::from(vec![
+                            "Identity: ".into(),
+                            text::Span::from(&attrs.identity),
+                        ]),
+                        text::Line::from(vec![
+                            "Worker version: ".into(),
+                            text::Span::from(if let Some(ts) = &attrs.worker_version {
+                                &ts.build_id
+                            } else {
+                                "-"
+                            }),
+                        ])
+                    ];
+                    widgets::Paragraph::new(lines).render(areas[0], buf);
+
+                    if let Some(payloads) = attrs.details.as_ref() {
+                        for p in payloads.payloads.iter().take(1) {
+                            let payload = Payload::from(p).with_title("Details");
                             payload.render(areas[1], buf);
                         }
                     }
@@ -594,7 +812,6 @@ impl widgets::Widget for &EventWidget {
                 history::history_event::Attributes::ActivityTaskFailedEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
                         layout::Constraint::Length(4),
-                        layout::Constraint::Fill(1),
                         layout::Constraint::Fill(1),
                     ])
                     .split(area);
@@ -629,6 +846,11 @@ impl widgets::Widget for &EventWidget {
                         ]),
                     ];
                     widgets::Paragraph::new(lines).render(areas[0], buf);
+
+                    if let Some(failure) = &attrs.failure {
+                        let failure = FailureWidget::from(failure);
+                        failure.render(areas[1], buf);
+                    }
                 }
                 _ => {}
             }
