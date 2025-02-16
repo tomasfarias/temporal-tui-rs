@@ -26,8 +26,18 @@ async fn main() -> AppResult<()> {
     } else {
         "info".to_string()
     };
+
     structured_logger::Builder::with_level(&level)
-        .with_target_writer("*", async_json::new_writer(tokio::io::stdout()))
+        .with_target_writer(
+            "*",
+            async_json::new_writer(
+                tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&settings.log_path)
+                    .await?,
+            ),
+        )
         .init();
 
     // Create an application.

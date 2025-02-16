@@ -5,38 +5,23 @@ use std::sync;
 use std::time;
 
 use crossterm::event;
-use ratatui::{backend::Backend, layout, style, style::Stylize, symbols, text, widgets, Frame};
+use ratatui::{
+    backend::Backend, layout, style, style::Stylize, symbols, text, widgets, widgets::Widget, Frame,
+};
 use temporal_client::{self, ClientOptionsBuilder};
 use tokio::task;
 use url::Url;
 
 use crate::{
-    event::Event, settings::Settings, theme::Theme, tui::Tui, widgets::workflow::WorkflowWidget,
-    widgets::workflow_table::WorkflowTableWidget,
+    event::Event, settings::Settings, theme::Theme, tui::Tui, widgets::keybinds::KeybindsWidget,
+    widgets::workflow::WorkflowWidget, widgets::workflow_table::WorkflowTableWidget,
+    widgets::Keybindable, widgets::ViewWidget,
 };
 
 const FOOTER_INFO_TEXT: [&str; 1] = ["(q) quit | (↑/j) move up | (↓/k) move down | (r) reload"];
 
 /// Application result type.
 pub type AppResult<T> = std::result::Result<T, anyhow::Error>;
-
-/// Modes the application can be in.
-#[derive(Debug)]
-pub enum Mode {
-    /// Default [`Mode`] that allows navigation.
-    Normal,
-    /// [`Mode`] enabled when needing to take user input.
-    Insert,
-}
-
-impl<'m> Mode {
-    pub fn as_str(&'m self) -> &'m str {
-        match self {
-            Mode::Normal => "NORMAL",
-            Mode::Insert => "INSERT",
-        }
-    }
-}
 
 /// The main Temporal TUI application.
 #[derive(Debug)]
@@ -46,23 +31,10 @@ pub struct App {
     temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     /// Temporal namespace we are connected to.
     namespace: String,
-    /// The current [`View`] being displayed.
-    view: View,
-    /// The current [`Mode`] the [`App`] is in.
-    mode: Mode,
+    /// The current [`ViewWidget`] being displayed.
+    view: ViewWidget,
     /// The [`App`]'s [`Theme`] defines its colors.
     theme: Theme,
-}
-
-/// Enumeration of potential views the [`App`] can display.
-#[derive(Debug)]
-pub enum View {
-    /// A view of all Temporal workflow executions rendered by [`WorkflowTableWidget`].
-    WorkflowTable(WorkflowTableWidget),
-    /// A view of a single workflow execution.
-    Workflow(WorkflowWidget),
-    /// A view of all Temporal schedules.
-    ScheduleTable,
 }
 
 impl App {
@@ -114,8 +86,7 @@ impl App {
             running: true,
             temporal_client,
             namespace,
-            view: View::WorkflowTable(workflow_table),
-            mode: Mode::Normal,
+            view: ViewWidget::WorkflowTable(workflow_table),
             theme,
         })
     }
@@ -140,17 +111,7 @@ impl App {
     }
 
     pub async fn run_view(&mut self) {
-        match &mut self.view {
-            View::WorkflowTable(workflow_table) => {
-                workflow_table.run();
-                workflow_table.reload().await;
-            }
-            View::Workflow(workflow) => {
-                workflow.run();
-                workflow.reload().await;
-            }
-            View::ScheduleTable => panic!("not implemented"),
-        }
+        self.view.run().await;
     }
 
     /// Handles the tick event of the terminal.
@@ -180,11 +141,7 @@ impl App {
             &layout::Layout::vertical([layout::Constraint::Fill(1), layout::Constraint::Length(2)]);
         let [body_area, footer_area] = vertical.areas(app_area);
 
-        match &self.view {
-            View::WorkflowTable(workflow_table) => frame.render_widget(workflow_table, body_area),
-            View::Workflow(workflow) => frame.render_widget(workflow, body_area),
-            _ => panic!("not implemented"),
-        };
+        frame.render_widget(&self.view, body_area);
 
         let footer_horizontal = &layout::Layout::horizontal([
             layout::Constraint::Length(10),
@@ -192,123 +149,62 @@ impl App {
             // Just to allow aligning the keybinds in the center, currently this third area is not used.
             layout::Constraint::Length(10),
         ]);
-        let [footer_left_area, footer_center_area, _] = footer_horizontal.areas(footer_area);
+        let [_, footer_center_area, _] = footer_horizontal.areas(footer_area);
 
-        let mode_footer = widgets::Paragraph::new(text::Line::from(self.mode.as_str()))
-            .style(
-                style::Style::new()
-                    .fg(self.theme.footer_foreground)
-                    .bg(self.theme.footer_background),
-            )
-            .centered()
-            .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
-        frame.render_widget(&mode_footer, footer_left_area);
+        let mut keybinds = KeybindsWidget::new(self.view.keybinds(), self.theme);
+        keybinds.push(("Quit", &["Ctrl+C"]));
+        // let mode_footer = widgets::Paragraph::new(text::Line::from(self.mode.as_str()))
+        //     .style(
+        //         style::Style::new()
+        //             .fg(self.theme.footer_foreground)
+        //             .bg(self.theme.footer_background),
+        //     )
+        //     .centered()
+        //     .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
+        // frame.render_widget(&mode_footer, footer_left_area);
 
-        let kebyinds_footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
-            .style(
-                style::Style::new()
-                    .fg(self.theme.footer_foreground)
-                    .bg(self.theme.footer_background),
-            )
-            .centered()
-            .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
-        frame.render_widget(&kebyinds_footer, footer_center_area);
+        // let kebyinds_footer = widgets::Paragraph::new(text::Text::from_iter(FOOTER_INFO_TEXT))
+        //     .style(
+        //         style::Style::new()
+        //             .fg(self.theme.footer_foreground)
+        //             .bg(self.theme.footer_background),
+        //     )
+        //     .centered()
+        //     .block(widgets::Block::bordered().borders(widgets::Borders::NONE));
+        frame.render_widget(&keybinds, footer_center_area);
     }
 
     fn title(&self) -> String {
         format!("Temporal TUI - {}", self.namespace)
     }
 
-    pub fn set_mode(&mut self, mode: Mode) {
-        self.mode = mode;
-    }
-
     pub async fn handle_event(&mut self, event: &Event) {
-        match self.mode {
-            Mode::Insert => match event {
-                Event::Key(key_event) => match key_event.code {
-                    // Switch to Normal mode
-                    event::KeyCode::Esc => {
-                        self.set_mode(Mode::Normal);
-                    }
-                    // Exit application on `Ctrl-C`
-                    event::KeyCode::Char('c') | event::KeyCode::Char('C') => {
-                        if key_event.modifiers == event::KeyModifiers::CONTROL {
-                            self.quit();
-                        } else {
-                            self.handle_insert_key(key_event.code);
-                        }
-                    }
-                    key => {
-                        self.handle_insert_key(key);
-                    }
-                },
-                _ => {}
-            },
-            Mode::Normal => {
-                match event {
-                    Event::Key(key_event) => {
-                        match key_event.code {
-                            // Switch to Insert mode
-                            event::KeyCode::Char('i') => {
-                                self.set_mode(Mode::Insert);
-                            }
-                            // Exit application on `ESC` or `q`
-                            event::KeyCode::Esc => {
-                                self.quit();
-                            }
-                            event::KeyCode::Enter => {
-                                if let View::WorkflowTable(workflow_table) = &self.view {
-                                    if let Some(workflow_id) =
-                                        workflow_table.get_selected_workflow_id()
-                                    {
-                                        let workflow = View::Workflow(WorkflowWidget::new(
-                                            &self.temporal_client,
-                                            &workflow_id,
-                                            None,
-                                            self.theme,
-                                        ));
-                                        self.view = workflow;
-                                        self.run_view().await;
-                                    } else {
-                                        self.handle_normal_key(key_event.code).await;
-                                    }
-                                } else {
-                                    self.handle_normal_key(key_event.code).await;
-                                }
-                            }
-                            // Exit application on `Ctrl-C`
-                            event::KeyCode::Char('c') | event::KeyCode::Char('C') => {
-                                if key_event.modifiers == event::KeyModifiers::CONTROL {
-                                    self.quit();
-                                } else {
-                                    self.handle_normal_key(key_event.code).await;
-                                }
-                            }
-                            key => {
-                                self.handle_normal_key(key).await;
-                            }
-                        }
-                    }
-                    _ => {}
+        match event {
+            Event::Key(key_event) => {
+                if let event::KeyEvent {
+                    code: event::KeyCode::Char('c'),
+                    modifiers: event::KeyModifiers::CONTROL,
+                    ..
+                } = key_event
+                {
+                    self.quit()
+                } else {
+                    self.handle_key(*key_event).await
                 }
             }
+            _ => {}
         }
     }
 
-    pub fn handle_insert_key(&mut self, key: event::KeyCode) {
-        match &mut self.view {
-            View::WorkflowTable(workflow_table) => workflow_table.handle_insert_key(key),
-            View::Workflow(_) => panic!("not implemented"),
-            View::ScheduleTable => panic!("not implemented"),
-        }
-    }
+    pub async fn handle_key(&mut self, key: event::KeyEvent) {
+        let should_change_view = match &mut self.view {
+            ViewWidget::WorkflowTable(workflow_table) => workflow_table.handle_key(key).await,
+            ViewWidget::Workflow(workflow) => workflow.handle_key(key).await,
+        };
 
-    pub async fn handle_normal_key(&mut self, key: event::KeyCode) {
-        match &mut self.view {
-            View::WorkflowTable(workflow_table) => workflow_table.handle_normal_key(key).await,
-            View::Workflow(_) => panic!("not implemented"),
-            View::ScheduleTable => panic!("not implemented"),
+        if let Some(view) = should_change_view {
+            self.view = view;
+            self.run_view().await;
         }
     }
 }

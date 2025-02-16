@@ -1,3 +1,5 @@
+use std::env;
+use std::fs;
 use std::path;
 use std::str;
 
@@ -5,8 +7,22 @@ use serde_derive::Deserialize;
 
 use crate::theme::{Theme, SOLARIZED_DARK_HIGH_CONTRAST};
 
-fn default_port() -> u16 {
-    7233
+fn default_log_path() -> path::PathBuf {
+    let home: Option<std::path::PathBuf> = std::env::home_dir();
+    let state_dir = env::var("XDG_STATE_HOME")
+        .ok()
+        .and_then(|state_home| {
+            let path = path::PathBuf::from(state_home);
+            if path.is_absolute() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .or_else(|| home.as_ref().map(|home| home.join(".local/state")))
+        .unwrap()
+        .join("temporal-tui");
+    state_dir.join("temporal-tui.log")
 }
 
 #[derive(Debug, Deserialize)]
@@ -19,10 +35,10 @@ pub struct ThemeSettings {
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
-    #[serde(default)]
     pub debug: bool,
+    #[serde(default = "default_log_path")]
+    pub log_path: path::PathBuf,
     pub host: String,
-    #[serde(default = "default_port")]
     pub port: u16,
     pub namespace: String,
     pub server_root_ca_cert: path::PathBuf,
@@ -36,7 +52,29 @@ impl Settings {
     pub fn new() -> Result<Self, config::ConfigError> {
         let home: Option<std::path::PathBuf> = std::env::home_dir();
 
-        let config_home = std::env::var("XDG_CONFIG_HOME")
+        let state_dir = env::var("XDG_STATE_HOME")
+            .ok()
+            .and_then(|state_home| {
+                let path = path::PathBuf::from(state_home);
+                if path.is_absolute() {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| home.as_ref().map(|home| home.join(".local/state")))
+            .unwrap()
+            .join("temporal-tui");
+
+        fs::create_dir_all(&state_dir).map_err(|e| {
+            config::ConfigError::Message(format!(
+                "could not create state directory in '{}': {}",
+                state_dir.as_path().display(),
+                e
+            ))
+        })?;
+
+        let config_dir = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .and_then(|config_home| {
                 let path = std::path::PathBuf::from(config_home);
@@ -52,9 +90,21 @@ impl Settings {
             ))?
             .join("temporal-tui");
 
-        let config_path = config_home.join("config.toml");
+        fs::create_dir_all(&config_dir).map_err(|e| {
+            config::ConfigError::Message(format!(
+                "could not create configuration directory in '{}': {}",
+                config_dir.as_path().display(),
+                e
+            ))
+        })?;
+
+        let config_path = config_dir.join("config.toml");
 
         let s = config::Config::builder()
+            .set_default("port", 7233)
+            .unwrap()
+            .set_default("debug", false)
+            .unwrap()
             .add_source(config::File::from(config_path).required(false))
             .add_source(config::Environment::with_prefix("temporal_tui"))
             .build()?;

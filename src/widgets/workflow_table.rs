@@ -3,18 +3,35 @@ use std::sync;
 use crossterm::event;
 use ratatui::{buffer, layout, style, style::Stylize, text, widgets};
 use temporal_client::{self, WorkflowClientTrait};
-use temporal_sdk_core_protos::temporal::api::{
-    common::v1::WorkflowType, workflow::v1::WorkflowExecutionInfo,
-    workflowservice::v1::ListWorkflowExecutionsResponse,
-};
+use temporal_sdk_core_protos::temporal::api::workflowservice::v1 as service;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time;
 
 use crate::theme::Theme;
-use crate::widgets::common::{LoadingState, Message, WorkflowExecution, WorkflowExecutionStatus};
+use crate::widgets::common::{LoadingState, Message, WorkflowExecution};
+use crate::widgets::workflow::WorkflowWidget;
+use crate::widgets::{Keybindable, ViewWidget};
 
 const ITEM_HEIGHT: usize = 1;
+
+/// Modes the [`WorkflowTableWidget`] can be in.
+#[derive(Debug, Clone, Copy)]
+pub enum Mode {
+    /// Default [`Mode`] that allows navigation.
+    Normal,
+    /// [`Mode`] enabled when taking user input to write a query.
+    Query,
+}
+
+impl<'m> Mode {
+    pub fn as_str(&'m self) -> &'m str {
+        match self {
+            Mode::Normal => "NORMAL",
+            Mode::Query => "QUERY",
+        }
+    }
+}
 
 /// A widget to input a query for Temporal.
 #[derive(Debug, Clone)]
@@ -52,10 +69,15 @@ impl QueryInput {
             None => "".to_owned(),
         }
     }
+}
 
-    pub fn handle_key(&mut self, key: event::KeyCode) {
+impl Keybindable for QueryInput {
+    async fn handle_key(&mut self, key: event::KeyEvent) -> Option<ViewWidget> {
         match key {
-            event::KeyCode::Char(c) => {
+            event::KeyEvent {
+                code: event::KeyCode::Char(c),
+                ..
+            } => {
                 if let Some(query) = self.query.as_mut() {
                     if self.cursor == query.len() - 1 {
                         query.pop();
@@ -72,7 +94,10 @@ impl QueryInput {
                     self.cursor = 1;
                 }
             }
-            event::KeyCode::Backspace => {
+            event::KeyEvent {
+                code: event::KeyCode::Backspace,
+                ..
+            } => {
                 if let Some(query) = self.query.as_mut() {
                     if query.len() > 1 {
                         if self.cursor == query.len() - 1 {
@@ -87,14 +112,20 @@ impl QueryInput {
                 }
                 self.query.take_if(|v| v.len() == 1);
             }
-            event::KeyCode::Left => {
+            event::KeyEvent {
+                code: event::KeyCode::Left,
+                ..
+            } => {
                 if let Some(_) = self.query.as_ref() {
                     if self.cursor > 0 {
                         self.cursor -= 1;
                     }
                 }
             }
-            event::KeyCode::Right => {
+            event::KeyEvent {
+                code: event::KeyCode::Right,
+                ..
+            } => {
                 if let Some(query) = self.query.as_ref() {
                     if self.cursor < query.len() {
                         self.cursor += 1;
@@ -102,7 +133,12 @@ impl QueryInput {
                 }
             }
             _ => {}
-        }
+        };
+        None
+    }
+
+    fn keybinds<'k>(&'k self) -> &'k [(&'k str, &'k [&'k str])] {
+        &[("Toggle query", &["Ctrl+q"])]
     }
 }
 
@@ -144,6 +180,7 @@ pub struct WorkflowTableWidget {
     temporal_client: sync::Arc<temporal_client::RetryClient<temporal_client::Client>>,
     sender: sync::Arc<Option<mpsc::Sender<Message>>>,
     page_size: u32,
+    mode: Mode,
     theme: Theme,
     last_reload: sync::Arc<sync::RwLock<Option<time::Instant>>>,
     query: sync::Arc<sync::RwLock<QueryInput>>,
@@ -170,6 +207,7 @@ impl WorkflowTableWidget {
             sender: sync::Arc::new(None),
             page_size,
             theme,
+            mode: Mode::Normal,
             last_reload: sync::Arc::new(sync::RwLock::new(None)),
             query: sync::Arc::new(sync::RwLock::new(QueryInput {
                 theme,
@@ -240,19 +278,19 @@ impl WorkflowTableWidget {
         state.loading_state = loading_state;
     }
 
-    fn on_reload(&mut self, response: ListWorkflowExecutionsResponse) {
+    fn on_reload(&mut self, response: service::ListWorkflowExecutionsResponse) {
         self.on_load(response, true);
         self.set_loading_state(LoadingState::Reloaded);
-        log::debug!(widget = "WorkflowTableWidget"; "Reloaded");
+        log::debug!(widget = "WorkflowTableWidget", method = "on_reload"; "Reloaded");
     }
 
-    fn on_page_load(&mut self, response: ListWorkflowExecutionsResponse) {
+    fn on_page_load(&mut self, response: service::ListWorkflowExecutionsResponse) {
         self.on_load(response, false);
         self.set_loading_state(LoadingState::PageLoaded);
-        log::debug!(widget = "WorkflowTableWidget"; "Loaded next page");
+        log::debug!(widget = "WorkflowTableWidget", method = "on_page_load"; "Loaded next page");
     }
 
-    fn on_load(&mut self, response: ListWorkflowExecutionsResponse, clear: bool) {
+    fn on_load(&mut self, response: service::ListWorkflowExecutionsResponse, clear: bool) {
         let executions: Vec<WorkflowExecution> = match response
             .executions
             .into_iter()
@@ -391,30 +429,141 @@ impl WorkflowTableWidget {
         }
     }
 
-    pub fn handle_insert_key(&mut self, key: event::KeyCode) {
-        match key {
-            event::KeyCode::Char(_) | event::KeyCode::Backspace | event::KeyCode::Enter => {
-                let mut query_input = self.query.write().unwrap();
-                query_input.handle_key(key);
-            }
-            _ => {}
-        }
-    }
-
-    pub async fn handle_normal_key(&mut self, key: event::KeyCode) {
-        match key {
-            event::KeyCode::Char('j') | event::KeyCode::Down => self.next_row().await,
-            event::KeyCode::Char('k') | event::KeyCode::Up => self.previous_row(),
-            event::KeyCode::Char('r') | event::KeyCode::Right => self.reload().await,
-            _ => {}
-        }
-    }
-
     pub fn get_selected_workflow_id(&self) -> Option<String> {
         let state = self.state.read().unwrap();
         match state.table_state.selected() {
             Some(i) => Some(state.workflow_executions[i].workflow_id.clone()),
             None => None,
+        }
+    }
+
+    pub async fn handle_query_key(&mut self, key: event::KeyEvent) {
+        match key {
+            // Mode switch
+            event::KeyEvent {
+                code: event::KeyCode::Char('q'),
+                modifiers: event::KeyModifiers::CONTROL,
+                ..
+            } => self.set_mode(Mode::Normal),
+            // Reload workflow table
+            event::KeyEvent {
+                code: event::KeyCode::Char('r'),
+                modifiers: event::KeyModifiers::CONTROL,
+                ..
+            } => self.reload().await,
+            // Pass along to `QueryInput`
+            event::KeyEvent {
+                code: event::KeyCode::Char(_),
+                ..
+            }
+            | event::KeyEvent {
+                code: event::KeyCode::Backspace,
+                ..
+            }
+            | event::KeyEvent {
+                code: event::KeyCode::Left,
+                ..
+            }
+            | event::KeyEvent {
+                code: event::KeyCode::Right,
+                ..
+            } => {
+                let mut query_input = self.query.write().unwrap();
+                query_input.handle_key(key).await;
+            }
+            _ => {}
+        }
+    }
+
+    pub async fn handle_normal_key(&mut self, key: event::KeyEvent) -> Option<WorkflowWidget> {
+        match key {
+            // Mode switch
+            event::KeyEvent {
+                code: event::KeyCode::Char('q'),
+                modifiers: event::KeyModifiers::CONTROL,
+                ..
+            } => self.set_mode(Mode::Query),
+            // Navigation
+            event::KeyEvent {
+                code: event::KeyCode::Char('j'),
+                ..
+            }
+            | event::KeyEvent {
+                code: event::KeyCode::Down,
+                ..
+            } => self.next_row().await,
+            event::KeyEvent {
+                code: event::KeyCode::Char('k'),
+                ..
+            }
+            | event::KeyEvent {
+                code: event::KeyCode::Up,
+                ..
+            } => self.previous_row(),
+            // Reload workflow table
+            event::KeyEvent {
+                code: event::KeyCode::Char('r'),
+                modifiers: event::KeyModifiers::CONTROL,
+                ..
+            } => self.reload().await,
+            // Select workflow and switch to workflow widget
+            event::KeyEvent {
+                code: event::KeyCode::Enter,
+                ..
+            } => {
+                if let Some(workflow_id) = self.get_selected_workflow_id() {
+                    let workflow_widget =
+                        WorkflowWidget::new(&self.temporal_client, &workflow_id, None, self.theme);
+                    return Some(workflow_widget);
+                }
+            }
+            _ => {}
+        };
+        None
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+}
+
+impl Keybindable for WorkflowTableWidget {
+    async fn handle_key(&mut self, key: event::KeyEvent) -> Option<ViewWidget> {
+        match self.mode {
+            Mode::Query => {
+                if let event::KeyEvent {
+                    code: event::KeyCode::Char('r'),
+                    modifiers: event::KeyModifiers::CONTROL,
+                    ..
+                } = key
+                {
+                    self.reload().await;
+                    None
+                } else {
+                    self.handle_query_key(key).await;
+                    None
+                }
+            }
+            Mode::Normal => {
+                if let Some(workflow_widget) = self.handle_normal_key(key).await {
+                    Some(ViewWidget::Workflow(workflow_widget))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn keybinds<'k>(&'k self) -> &'k [(&'k str, &'k [&'k str])] {
+        match self.mode {
+            Mode::Query => &[("Toggle query", &["Ctrl+q"]), ("Reload", &["Ctrl+r"])],
+            Mode::Normal => &[
+                ("Up", &["j", "↑"]),
+                ("Down", &["k", "↓"]),
+                ("View workflow", &["Enter"]),
+                ("Toggle query", &["Ctrl+q"]),
+                ("Reload", &["Ctrl+r"]),
+            ],
         }
     }
 }
@@ -446,8 +595,8 @@ impl widgets::Widget for &WorkflowTableWidget {
 
         let table_block = widgets::Block::bordered()
             .title(
-                text::Line::from("WORKFLOWS")
-                    .centered()
+                text::Line::from("Workflows")
+                    .left_aligned()
                     .fg(self.theme.header_foreground)
                     .bold(),
             )
@@ -455,7 +604,6 @@ impl widgets::Widget for &WorkflowTableWidget {
             .border_style(style::Style::new().fg(self.theme.border))
             .bg(self.theme.background);
 
-        let mut state = self.state.write().unwrap();
         let header_style = style::Style::default()
             .fg(self.theme.header_foreground)
             .bg(self.theme.header_background);
@@ -481,6 +629,8 @@ impl widgets::Widget for &WorkflowTableWidget {
         .style(header_style)
         .height(1);
 
+        let mut state = self.state.write().unwrap();
+
         let rows = state
             .workflow_executions
             .iter()
@@ -490,19 +640,10 @@ impl widgets::Widget for &WorkflowTableWidget {
                     0 => self.theme.background,
                     _ => self.theme.alt_background,
                 };
-                let status_color = match execution.status {
-                    WorkflowExecutionStatus::Unspecified => self.theme.cancelled_background,
-                    WorkflowExecutionStatus::Running => self.theme.running_background,
-                    WorkflowExecutionStatus::Completed => self.theme.success_background,
-                    WorkflowExecutionStatus::Failed => self.theme.failure_background,
-                    WorkflowExecutionStatus::Canceled => self.theme.cancelled_background,
-                    WorkflowExecutionStatus::Terminated => self.theme.failure_background,
-                    WorkflowExecutionStatus::ContinuedAsNew => self.theme.cancelled_background,
-                    WorkflowExecutionStatus::TimedOut => self.theme.failure_background,
-                };
+                let status_color = execution.status_color_from_theme(self.theme);
 
                 widgets::Row::new(vec![
-                    widgets::Cell::from(&execution.status).bg(status_color),
+                    widgets::Cell::from(execution.status_as_string()).bg(status_color),
                     widgets::Cell::new(execution.r#type.clone()),
                     widgets::Cell::new(execution.workflow_id.clone()),
                     widgets::Cell::new(execution.task_queue.clone()),
