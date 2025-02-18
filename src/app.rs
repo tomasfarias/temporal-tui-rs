@@ -152,7 +152,7 @@ impl App {
         let [_, footer_center_area, _] = footer_horizontal.areas(footer_area);
 
         let mut keybinds = KeybindsWidget::new(self.view.keybinds(), self.theme);
-        keybinds.push(("Quit", &["Ctrl+C"]));
+        keybinds.push(("Quit", &["Ctrl+c"]));
         // let mode_footer = widgets::Paragraph::new(text::Line::from(self.mode.as_str()))
         //     .style(
         //         style::Style::new()

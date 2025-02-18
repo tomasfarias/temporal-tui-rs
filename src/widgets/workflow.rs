@@ -250,7 +250,6 @@ impl TryFrom<workflow::PendingActivityInfo> for PendingActivity {
 pub struct Attributes {
     inner: Option<history::history_event::Attributes>,
     table_state: widgets::TableState,
-    theme: Theme,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +258,7 @@ pub struct EventWidget {
     time: Option<chrono::DateTime<chrono::Utc>>,
     r#type: enums::EventType,
     attributes: Option<history::history_event::Attributes>,
+    theme: Theme,
 }
 
 impl EventWidget {
@@ -346,7 +346,7 @@ impl widgets::Widget for &EventWidget {
                         ]),
                     ];
 
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(payloads) = attrs.input.as_ref() {
                         for p in payloads.payloads.iter() {
@@ -382,7 +382,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(format!("{}", attrs.attempt)),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::WorkflowTaskStartedEventAttributes(attrs) => {
                     let lines = vec![
@@ -410,7 +410,7 @@ impl widgets::Widget for &EventWidget {
                             }),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::WorkflowTaskCompletedEventAttributes(attrs) => {
                     let lines = vec![
@@ -435,14 +435,13 @@ impl widgets::Widget for &EventWidget {
                             }),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::WorkflowTaskFailedEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
                         layout::Constraint::Length(4),
                         layout::Constraint::Fill(1),
                     ]).split(area);
-
 
                     let lines = vec![
                         text::Line::from(vec![
@@ -466,7 +465,7 @@ impl widgets::Widget for &EventWidget {
                             }),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(failure) = &attrs.failure {
                         let failure = FailureWidget::from(failure);
@@ -496,7 +495,28 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(timeout_type.as_str_name()),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
+                }
+                history::history_event::Attributes::WorkflowExecutionCompletedEventAttributes(attrs) => {
+                    let areas = layout::Layout::vertical([
+                        layout::Constraint::Length(1),
+                        layout::Constraint::Fill(1),
+                    ]).split(area);
+
+                    let lines = vec![
+                        text::Line::from(vec![
+                            "Workflow task completed event ID: ".into(),
+                            text::Span::from(attrs.workflow_task_completed_event_id.to_string()),
+                        ]),
+                    ];
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
+
+                    if let Some(payloads) = attrs.result.as_ref() {
+                        for p in payloads.payloads.iter().take(1) {
+                            let payload = Payload::from(p).with_title("Result");
+                            payload.render(areas[1], buf);
+                        }
+                    }
                 }
                 history::history_event::Attributes::WorkflowExecutionCancelRequestedEventAttributes(attrs) => {
                     let lines = vec![
@@ -509,7 +529,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(&attrs.cause),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::WorkflowExecutionCanceledEventAttributes(attrs) => {
                     let lines = vec![
@@ -518,7 +538,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(format!("{}", attrs.workflow_task_completed_event_id)),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::WorkflowExecutionFailedEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
@@ -548,7 +568,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(attrs.workflow_task_completed_event_id.to_string()),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(failure) = &attrs.failure {
                         let failure = FailureWidget::from(failure);
@@ -644,7 +664,7 @@ impl widgets::Widget for &EventWidget {
                             ),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(retry_policy) = attrs.retry_policy.as_ref() {
                         // Using `collections::BTreeMap` for consistent order.
@@ -664,6 +684,7 @@ impl widgets::Widget for &EventWidget {
                                     .border_type(widgets::BorderType::Rounded)
                                     .title("Retry policy non retryable error types"),
                             )
+                            .fg(self.theme.foreground)
                             .wrap(widgets::Wrap { trim: false })
                             .render(areas[1], buf);
                     }
@@ -685,6 +706,7 @@ impl widgets::Widget for &EventWidget {
                                     .border_type(widgets::BorderType::Rounded)
                                     .title("Header"),
                             )
+                            .fg(self.theme.foreground)
                             .wrap(widgets::Wrap { trim: false })
                             .render(areas[2], buf);
                     }
@@ -722,7 +744,7 @@ impl widgets::Widget for &EventWidget {
                             }),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::ActivityTaskCompletedEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
@@ -745,7 +767,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(&attrs.identity),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(payloads) = attrs.result.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
@@ -765,7 +787,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(attrs.workflow_task_completed_event_id.to_string()),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(area, buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(area, buf);
                 }
                 history::history_event::Attributes::ActivityTaskCanceledEventAttributes(attrs) => {
                     let areas = layout::Layout::vertical([
@@ -800,7 +822,7 @@ impl widgets::Widget for &EventWidget {
                             }),
                         ])
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(payloads) = attrs.details.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
@@ -845,7 +867,7 @@ impl widgets::Widget for &EventWidget {
                             text::Span::from(attrs.started_event_id.to_string()),
                         ]),
                     ];
-                    widgets::Paragraph::new(lines).render(areas[0], buf);
+                    widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(failure) = &attrs.failure {
                         let failure = FailureWidget::from(failure);
@@ -855,22 +877,6 @@ impl widgets::Widget for &EventWidget {
                 _ => {}
             }
         };
-    }
-}
-
-impl TryFrom<history::HistoryEvent> for EventWidget {
-    type Error = anyhow::Error;
-
-    fn try_from(history_event: history::HistoryEvent) -> Result<Self, Self::Error> {
-        let event_type = enums::EventType::try_from(history_event.event_type)?;
-        Ok(Self {
-            id: history_event.event_id,
-            time: history_event
-                .event_time
-                .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)),
-            r#type: event_type,
-            attributes: history_event.attributes,
-        })
     }
 }
 
@@ -897,7 +903,16 @@ impl HistoryWidget {
 
     fn extend_from_history(&mut self, history: history::History) {
         for history_event in history.events.into_iter() {
-            if let Ok(event) = EventWidget::try_from(history_event) {
+            if let Ok(event_type) = enums::EventType::try_from(history_event.event_type) {
+                let event = EventWidget {
+                    id: history_event.event_id,
+                    time: history_event
+                        .event_time
+                        .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)),
+                    r#type: event_type,
+                    attributes: history_event.attributes,
+                    theme: self.theme,
+                };
                 self.events.push(event);
             }
         }
@@ -1381,7 +1396,9 @@ impl widgets::Widget for &WorkflowWidget {
             text::Line::raw("Workflow Type").left_aligned(),
             text::Line::raw("Task Queue").left_aligned(),
             text::Line::raw("History Size (Bytes)").left_aligned(),
-        ]);
+        ])
+        .fg(self.theme.foreground)
+        .bg(self.theme.background);
 
         let [start_time, end_time, execution_duration, workflow_run_id, workflow_type, task_queue, history_size_bytes] = [
             workflow_execution.start_time_as_string(),
@@ -1401,7 +1418,9 @@ impl widgets::Widget for &WorkflowWidget {
             text::Line::raw(workflow_type).right_aligned(),
             text::Line::raw(task_queue).right_aligned(),
             text::Line::raw(history_size_bytes).right_aligned(),
-        ]);
+        ])
+        .fg(self.theme.foreground)
+        .bg(self.theme.background);
 
         widgets::Widget::render(left_keys, header_left_area, buf);
         widgets::Widget::render(right_values, header_right_area, buf);
@@ -1421,7 +1440,12 @@ impl Keybindable for WorkflowWidget {
             | event::KeyEvent {
                 code: event::KeyCode::Down,
                 ..
-            } => self.next_row().await,
+            } => {
+                let is_displaying_history_event = self.is_displaying_history_event();
+                if !is_displaying_history_event {
+                    self.next_row().await
+                }
+            }
             event::KeyEvent {
                 code: event::KeyCode::Char('k'),
                 ..
@@ -1429,7 +1453,12 @@ impl Keybindable for WorkflowWidget {
             | event::KeyEvent {
                 code: event::KeyCode::Up,
                 ..
-            } => self.previous_row(),
+            } => {
+                let is_displaying_history_event = self.is_displaying_history_event();
+                if !is_displaying_history_event {
+                    self.previous_row()
+                }
+            }
             // Reload history table
             event::KeyEvent {
                 code: event::KeyCode::Char('r'),
@@ -1440,29 +1469,29 @@ impl Keybindable for WorkflowWidget {
                 code: event::KeyCode::Enter,
                 ..
             } => {
-                let history_state_selected = self.get_selected_history_event();
-                let mut workflow = self.workflow.write().unwrap();
+                let is_displaying_history_event = self.is_displaying_history_event();
+                if is_displaying_history_event {
+                    let mut workflow = self.workflow.write().unwrap();
+                    workflow.history.clear_display_event();
+                } else {
+                    let history_state_selected = self.get_selected_history_event();
+                    let mut workflow = self.workflow.write().unwrap();
 
-                match history_state_selected {
-                    Some(u) => workflow.history.display_event_at(u),
-                    _ => {}
+                    match history_state_selected {
+                        Some(u) => workflow.history.display_event_at(u),
+                        _ => {}
+                    }
                 }
             }
             event::KeyEvent {
                 code: event::KeyCode::Esc,
                 ..
             } => {
-                let is_displaying_history_event = self.is_displaying_history_event();
-                if is_displaying_history_event {
-                    let mut workflow = self.workflow.write().unwrap();
-                    workflow.history.clear_display_event();
-                } else {
-                    return Some(ViewWidget::WorkflowTable(WorkflowTableWidget::new(
-                        &self.temporal_client,
-                        self.theme,
-                        48,
-                    )));
-                }
+                return Some(ViewWidget::WorkflowTable(WorkflowTableWidget::new(
+                    &self.temporal_client,
+                    self.theme,
+                    48,
+                )));
             }
             _ => {}
         };
@@ -1470,11 +1499,17 @@ impl Keybindable for WorkflowWidget {
     }
 
     fn keybinds<'k>(&'k self) -> &'k [(&'k str, &'k [&'k str])] {
-        &[
-            ("Up", &["j", "↑"]),
-            ("Down", &["k", "↓"]),
-            ("Expand event", &["Enter"]),
-            ("Reload", &["Ctrl+r"]),
-        ]
+        let is_displaying_history_event = self.is_displaying_history_event();
+        if is_displaying_history_event {
+            &[("Collapse event", &["Enter"]), ("Previous view", &["Esc"])]
+        } else {
+            &[
+                ("Up", &["j", "↑"]),
+                ("Down", &["k", "↓"]),
+                ("Expand event", &["Enter"]),
+                ("Previous view", &["Esc"]),
+                ("Reload", &["Ctrl+r"]),
+            ]
+        }
     }
 }
