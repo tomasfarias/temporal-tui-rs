@@ -55,16 +55,30 @@ impl TryFrom<i32> for PendingActivityState {
 }
 
 #[derive(Debug, Clone)]
-pub struct Payload {
+pub struct PayloadWidget {
     metadata: collections::HashMap<String, Vec<u8>>,
     data: Vec<u8>,
-    title: Option<String>,
+    title: String,
+    theme: Theme,
 }
 
-impl Payload {
-    fn with_title(mut self, title: &str) -> Self {
-        self.title = Some(title.to_owned());
-        self
+impl PayloadWidget {
+    fn new(payload: temporal_common::Payload, title: &str, theme: Theme) -> Self {
+        Self {
+            metadata: collections::HashMap::from_iter(payload.metadata),
+            data: payload.data,
+            title: title.to_string(),
+            theme,
+        }
+    }
+
+    fn cloned(payload: &temporal_common::Payload, title: &str, theme: Theme) -> Self {
+        Self {
+            metadata: collections::HashMap::from_iter(payload.metadata.clone()),
+            data: payload.data.clone(),
+            title: title.to_string(),
+            theme,
+        }
     }
 
     fn to_string_pretty(&self) -> String {
@@ -83,36 +97,14 @@ impl Payload {
     }
 }
 
-impl From<temporal_common::Payload> for Payload {
-    fn from(p: temporal_common::Payload) -> Self {
-        Self {
-            metadata: collections::HashMap::from_iter(p.metadata),
-            data: p.data,
-            title: None,
-        }
-    }
-}
-
-impl From<&temporal_common::Payload> for Payload {
-    fn from(p: &temporal_common::Payload) -> Self {
-        Self {
-            metadata: collections::HashMap::from_iter(p.metadata.clone()),
-            data: p.data.clone(),
-            title: None,
-        }
-    }
-}
-
-impl widgets::Widget for &Payload {
+impl widgets::Widget for &PayloadWidget {
     fn render(self, area: layout::Rect, buf: &mut buffer::Buffer) {
-        let mut payload_block =
-            widgets::Block::bordered().border_type(widgets::BorderType::Rounded);
+        let payload_block = widgets::Block::bordered()
+            .border_type(widgets::BorderType::Rounded)
+            .border_style(style::Style::new().fg(self.theme.border))
+            .title(self.title.as_str().fg(self.theme.foreground));
 
-        if let Some(title) = self.title.as_ref() {
-            payload_block = payload_block.title(title.as_str());
-        }
-
-        widgets::Paragraph::new(self.to_string_pretty())
+        widgets::Paragraph::new(self.to_string_pretty().fg(self.theme.foreground))
             .block(payload_block)
             .wrap(widgets::Wrap { trim: false })
             .render(area, buf);
@@ -175,7 +167,7 @@ pub struct PendingActivity {
     id: String,
     r#type: Option<String>,
     state: enums::PendingActivityState,
-    heartbeat_details: Option<Vec<Payload>>,
+    heartbeat_details: Option<Vec<PayloadWidget>>,
     last_heartbeat_time: Option<chrono::DateTime<chrono::Utc>>,
     last_started_time: Option<chrono::DateTime<chrono::Utc>>,
     attempt: u32,
@@ -186,12 +178,11 @@ pub struct PendingActivity {
     last_worker_identity: String,
     last_attempt_complete_time: Option<chrono::DateTime<chrono::Utc>>,
     next_attempt_schedule_time: Option<chrono::DateTime<chrono::Utc>>,
+    theme: Theme,
 }
 
-impl TryFrom<workflow::PendingActivityInfo> for PendingActivity {
-    type Error = anyhow::Error;
-
-    fn try_from(info: workflow::PendingActivityInfo) -> Result<Self, Self::Error> {
+impl PendingActivity {
+    fn new(info: workflow::PendingActivityInfo, theme: Theme) -> Result<Self, anyhow::Error> {
         let state = enums::PendingActivityState::try_from(info.state)?;
         let last_failure = if let Some(f) = info.last_failure {
             Some(FailureWidget {
@@ -202,18 +193,18 @@ impl TryFrom<workflow::PendingActivityInfo> for PendingActivity {
         } else {
             None
         };
-        let heartbeat_details: Option<Vec<Payload>> = if let Some(payloads) = info.heartbeat_details
-        {
-            Some(
-                payloads
-                    .payloads
-                    .into_iter()
-                    .map(|p| Payload::from(p).with_title("Heartbeat details"))
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let heartbeat_details: Option<Vec<PayloadWidget>> =
+            if let Some(payloads) = info.heartbeat_details {
+                Some(
+                    payloads
+                        .payloads
+                        .into_iter()
+                        .map(|p| PayloadWidget::new(p, "Heartbeat details", theme))
+                        .collect(),
+                )
+            } else {
+                None
+            };
 
         Ok(Self {
             id: info.activity_id,
@@ -242,6 +233,7 @@ impl TryFrom<workflow::PendingActivityInfo> for PendingActivity {
             next_attempt_schedule_time: info
                 .next_attempt_schedule_time
                 .and_then(|t| chrono::DateTime::from_timestamp(t.seconds, t.nanos as u32)),
+            theme,
         })
     }
 }
@@ -349,8 +341,8 @@ impl widgets::Widget for &EventWidget {
                     widgets::Paragraph::new(lines).fg(self.theme.foreground).render(areas[0], buf);
 
                     if let Some(payloads) = attrs.input.as_ref() {
-                        for p in payloads.payloads.iter() {
-                            let payload = Payload::from(p).with_title("Input");
+                        for p in payloads.payloads.iter().take(1) {
+                            let payload = PayloadWidget::cloned(p, "Input", self.theme);
                             payload.render(areas[1], buf);
                         }
                     }
@@ -513,7 +505,7 @@ impl widgets::Widget for &EventWidget {
 
                     if let Some(payloads) = attrs.result.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
-                            let payload = Payload::from(p).with_title("Result");
+                            let payload = PayloadWidget::cloned(p, "Result", self.theme);
                             payload.render(areas[1], buf);
                         }
                     }
@@ -682,7 +674,9 @@ impl widgets::Widget for &EventWidget {
                             .block(
                                 widgets::Block::bordered()
                                     .border_type(widgets::BorderType::Rounded)
-                                    .title("Retry policy non retryable error types"),
+                                    .title("Retry policy non retryable error types".fg(self.theme.header_foreground))
+                                    .border_style(style::Style::new().fg(self.theme.border)),
+
                             )
                             .fg(self.theme.foreground)
                             .wrap(widgets::Wrap { trim: false })
@@ -694,7 +688,7 @@ impl widgets::Widget for &EventWidget {
                             .fields
                             .iter()
                             .map(|(k, v)| {
-                                let payload = Payload::from(v);
+                                let payload = PayloadWidget::cloned(v, "Header", self.theme);
                                 (k.to_string(), payload.to_string_pretty())
                             })
                             .collect();
@@ -704,7 +698,8 @@ impl widgets::Widget for &EventWidget {
                             .block(
                                 widgets::Block::bordered()
                                     .border_type(widgets::BorderType::Rounded)
-                                    .title("Header"),
+                                    .title("Header".fg(self.theme.header_foreground))
+                                    .border_style(style::Style::new().fg(self.theme.border)),
                             )
                             .fg(self.theme.foreground)
                             .wrap(widgets::Wrap { trim: false })
@@ -713,7 +708,7 @@ impl widgets::Widget for &EventWidget {
 
                     if let Some(payloads) = attrs.input.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
-                            let payload = Payload::from(p).with_title("Input");
+                            let payload = PayloadWidget::cloned(p, "Input", self.theme);
                             payload.render(areas[3], buf);
                         }
                     }
@@ -771,7 +766,7 @@ impl widgets::Widget for &EventWidget {
 
                     if let Some(payloads) = attrs.result.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
-                            let payload = Payload::from(p).with_title("Result");
+                            let payload = PayloadWidget::cloned(p, "Result", self.theme);
                             payload.render(areas[1], buf);
                         }
                     }
@@ -826,7 +821,7 @@ impl widgets::Widget for &EventWidget {
 
                     if let Some(payloads) = attrs.details.as_ref() {
                         for p in payloads.payloads.iter().take(1) {
-                            let payload = Payload::from(p).with_title("Details");
+                            let payload = PayloadWidget::cloned(p, "Details", self.theme);
                             payload.render(areas[1], buf);
                         }
                     }
@@ -940,7 +935,8 @@ impl widgets::StatefulWidget for &HistoryWidget {
     fn render(self, area: layout::Rect, buf: &mut buffer::Buffer, state: &mut Self::State) {
         let event_history_block = widgets::Block::bordered()
             .border_type(widgets::BorderType::Rounded)
-            .title(text::Span::from("Event history".fg(self.theme.foreground)));
+            .title(text::Span::from("Event history".fg(self.theme.foreground)))
+            .border_style(style::Style::new().fg(self.theme.border));
 
         let selected_row_style = style::Style::default()
             .add_modifier(style::Modifier::REVERSED)
@@ -1176,7 +1172,7 @@ impl WorkflowWidget {
         let pending_activities: Vec<PendingActivity> = match describe_workflow_response
             .pending_activities
             .into_iter()
-            .map(TryInto::try_into)
+            .map(|activity| PendingActivity::new(activity, self.theme))
             .collect()
         {
             Ok(v) => v,
@@ -1378,7 +1374,10 @@ impl widgets::Widget for &WorkflowWidget {
             .title(text::Span::from(
                 status.bg(status_color).fg(self.theme.foreground),
             ))
-            .title(text::Span::from(self.workflow_id.clone()));
+            .title(text::Span::from(
+                self.workflow_id.clone().fg(self.theme.header_foreground),
+            ))
+            .border_style(style::Style::new().fg(self.theme.border));
 
         let inner_header_area = header_block.inner(header_area);
 
